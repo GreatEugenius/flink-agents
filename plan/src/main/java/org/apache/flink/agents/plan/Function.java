@@ -17,8 +17,10 @@
  */
 package org.apache.flink.agents.plan;
 
+import java.io.Serializable;
+
 /** Base interface to represent user defined function. */
-public interface Function {
+public interface Function extends Serializable {
     /** execute function with arguments. */
     Object call(Object... args) throws Exception;
 

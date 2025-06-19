@@ -18,24 +18,27 @@
 
 package org.apache.flink.agents.plan;
 
-import org.apache.flink.agents.api.Event;
-
+import java.io.Serializable;
 import java.util.List;
 import java.util.Map;
 
 /** Workflow plan compiled from user defined workflow. */
-public class WorkflowPlan {
-    private final Map<Class<? extends Event>, List<Action>> actions;
+public class WorkflowPlan implements Serializable {
+    private final Map<String, List<Action>> actions;
 
-    public WorkflowPlan(Map<Class<? extends Event>, List<Action>> actions) {
+    public WorkflowPlan(Map<String, List<Action>> actions) {
         this.actions = actions;
     }
 
-    public List<Action> getAction(Class<?> type) {
+    public List<Action> getAction(String type) {
         return actions.get(type);
     }
 
-    public Map<Class<? extends Event>, List<Action>> getActions() {
+    public Map<String, List<Action>> getActions() {
         return actions;
+    }
+
+    public void addAction(String type, Action action) {
+        actions.computeIfAbsent(type, k -> new java.util.ArrayList<>()).add(action);
     }
 }

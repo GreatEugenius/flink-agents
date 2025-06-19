@@ -15,28 +15,45 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package org.apache.flink.agents.runtime.message;
 
 import java.io.Serializable;
 import java.util.OptionalLong;
 
-/** Message interface, used to represent messages sent between flink-agents operators. */
-public interface Message extends Serializable {
-    /**
-     * isBarrierMessage - returns an empty optional for non barrier messages or wrapped checkpointId
-     * for barrier messages.
-     *
-     * <p>When this message represents a checkpoint barrier, this method returns an {@code Optional}
-     * of a checkpoint id that produced that barrier. For other types of messages (i.e. {@code
-     * Payload}) this method returns an empty {@code Optional}.
-     */
-    OptionalLong isBarrierMessage();
+public abstract class DataMessage<K> implements Message, Serializable {
 
-    default Address source() {
-        return null;
+    protected static final long serialVersionUID = 1L;
+
+    protected final String eventType;
+
+    protected final K key;
+
+    public DataMessage(String eventType, K key) {
+        this.eventType = eventType;
+        this.key = key;
     }
 
-    default Address target() {
-        return null;
+    public String getEventType() {
+        return eventType;
+    }
+
+    public K getKey() {
+        return key;
+    }
+
+    public abstract Object getPayload();
+
+    @Override
+    public OptionalLong isBarrierMessage() {
+        return OptionalLong.empty();
+    }
+
+    public boolean isInputEvent() {
+        return eventType.equals("flink_agents.api.event.InputEvent");
+    }
+
+    public boolean isOutputEvent() {
+        return eventType.equals("flink_agents.api.event.OutputEvent");
     }
 }

@@ -37,4 +37,8 @@ public class ActionFunction implements Function {
     public void checkSignature(Class<?>[] parameterTypes) throws Exception {
         func.checkSignature(parameterTypes);
     }
+
+    public Function getFunc() {
+        return func;
+    }
 }

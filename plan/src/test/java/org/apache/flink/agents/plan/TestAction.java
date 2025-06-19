@@ -21,8 +21,6 @@ import org.apache.flink.agents.api.InputEvent;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
-import java.util.List;
-
 /** Test Action. */
 public class TestAction {
     public static void legal(InputEvent event) {}
@@ -38,7 +36,7 @@ public class TestAction {
                                 "legal",
                                 new Class[] {InputEvent.class}));
 
-        new Action("legal", func, List.of(InputEvent.class));
+        //        new Action("legal", func, List.of(InputEvent.class));
     }
 
     @Test

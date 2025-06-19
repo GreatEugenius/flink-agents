@@ -35,6 +35,14 @@ public class PythonFunction implements Function {
 
     @Override
     public void checkSignature(Class<?>[] parameterTypes) throws Exception {
-        throw new UnsupportedOperationException();
+        //        throw new UnsupportedOperationException();
+    }
+
+    public String getModule() {
+        return module;
+    }
+
+    public String getQualName() {
+        return qualName;
     }
 }

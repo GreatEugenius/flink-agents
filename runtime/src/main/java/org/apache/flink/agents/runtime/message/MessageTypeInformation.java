@@ -25,7 +25,7 @@ import org.apache.flink.api.java.typeutils.runtime.kryo.KryoSerializer;
 /** TypeInformation for {@link Message}. */
 public class MessageTypeInformation extends TypeInformation<Message> {
 
-    private MessageTypeInformation() {}
+    public MessageTypeInformation() {}
 
     public static final MessageTypeInformation INSTANCE = new MessageTypeInformation();
 

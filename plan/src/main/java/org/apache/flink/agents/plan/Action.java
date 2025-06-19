@@ -18,8 +18,7 @@
 
 package org.apache.flink.agents.plan;
 
-import org.apache.flink.agents.api.Event;
-
+import java.io.Serializable;
 import java.util.List;
 
 /**
@@ -28,12 +27,12 @@ import java.util.List;
  * <p>This class encapsulates a named workflow action that listens for specific event types and
  * executes an associated function when those events occur.
  */
-public class Action {
+public class Action implements Serializable {
     private final String name;
     private final ActionFunction exec;
-    private final List<Class<? extends Event>> listenEventTypes;
+    private final List<String> listenEventTypes;
 
-    public Action(String name, ActionFunction exec, List<Class<? extends Event>> listenEventTypes)
+    public Action(String name, ActionFunction exec, List<String> listenEventTypes)
             throws Exception {
         this.name = name;
         this.exec = exec;
@@ -48,7 +47,11 @@ public class Action {
         return exec;
     }
 
-    public List<Class<? extends Event>> getListenEventTypes() {
+    public List<String> getListenEventTypes() {
         return listenEventTypes;
+    }
+
+    public Function getFunc() {
+        return exec.getFunc();
     }
 }

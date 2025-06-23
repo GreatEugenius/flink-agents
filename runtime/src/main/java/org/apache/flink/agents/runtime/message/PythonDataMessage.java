@@ -19,7 +19,7 @@ public class PythonDataMessage<K> extends DataMessage<K> {
     public String toString() {
         return "PythonDataMessage{"
                 + "payload="
-                + Arrays.toString(payload)
+                + payload.toString()
                 + ", eventType='"
                 + eventType
                 + '\''

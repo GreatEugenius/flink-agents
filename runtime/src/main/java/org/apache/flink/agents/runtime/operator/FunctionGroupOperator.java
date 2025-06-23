@@ -5,8 +5,8 @@ import org.apache.flink.agents.plan.Function;
 import org.apache.flink.agents.plan.PythonFunction;
 import org.apache.flink.agents.plan.WorkflowPlan;
 import org.apache.flink.agents.runtime.backpressure.ThresholdBackPressureValve;
+import org.apache.flink.agents.runtime.context.RunnerContext;
 import org.apache.flink.agents.runtime.message.DataMessage;
-import org.apache.flink.agents.runtime.message.PythonDataMessage;
 import org.apache.flink.api.common.operators.MailboxExecutor;
 import org.apache.flink.api.common.state.ListState;
 import org.apache.flink.api.common.state.ListStateDescriptor;
@@ -15,7 +15,6 @@ import org.apache.flink.api.common.state.MapStateDescriptor;
 import org.apache.flink.api.common.typeinfo.TypeInformation;
 import org.apache.flink.runtime.state.StateSnapshotContext;
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.core.JsonProcessingException;
-import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.flink.streaming.api.operators.AbstractStreamOperator;
 import org.apache.flink.streaming.api.operators.ChainingStrategy;
 import org.apache.flink.streaming.api.operators.OneInputStreamOperator;
@@ -26,8 +25,10 @@ import pemja.core.PythonInterpreter;
 import pemja.core.PythonInterpreterConfig;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 
 public class FunctionGroupOperator<K> extends AbstractStreamOperator<DataMessage<K>>
@@ -44,6 +45,7 @@ public class FunctionGroupOperator<K> extends AbstractStreamOperator<DataMessage
     private transient WorkflowPlan workflowPlan;
     private transient PythonInterpreter interpreter;
 
+    private transient MapState<K, RunnerContext> runnerContexts;
     private transient MapState<K, Integer> key2pendingActionCount;
     private transient ListState<DataMessage<K>> pendingInputEvents;
     private TypeInformation<K> keyTypeInfo;
@@ -76,33 +78,44 @@ public class FunctionGroupOperator<K> extends AbstractStreamOperator<DataMessage
         K key = dataMessage.getKey();
         if (dataMessage.isInputEvent() && !canExecuteInputEvent(key)) {
             pendingInputEvents.add(dataMessage);
+        } else {
+            List<Action> actions = workflowPlan.getAction(dataMessage.getEventType());
+            if (dataMessage.isInputEvent()) {
+                addPendingActionCount(dataMessage.getKey(), actions.size());
+            }
+            processElementWithoutPending(dataMessage);
         }
+    }
 
+    public void processElementWithoutPending(DataMessage<K> dataMessage) throws Exception {
+        System.out.println("FunctionGroupOperator processElementWithoutPending " + dataMessage);
+        K key = dataMessage.getKey();
         List<Action> actions = workflowPlan.getAction(dataMessage.getEventType());
         if (actions != null) {
-            addPendingActionCount(dataMessage.getKey(), actions.size());
             for (Action action : actions) {
-                DataMessage<K> actionOutputMessage = null;
+                List<DataMessage<K>> actionOutputMessages = null;
                 Function actionFunction = action.getFunc();
                 if (actionFunction instanceof PythonFunction) {
-                    actionOutputMessage =
+                    actionOutputMessages =
                             executePythonFunction((PythonFunction) actionFunction, dataMessage);
                 } else {
                     throw new RuntimeException("Unsupported action type: " + action.getClass());
                 }
-                System.out.println(
-                        "FunctionGroupOperator processElement result " + actionOutputMessage);
-                addPendingActionCount(key, -1);
+                for (DataMessage<K> actionOutputMessage : actionOutputMessages) {
+                    System.out.println(
+                            "FunctionGroupOperator processElement result " + actionOutputMessage);
 
-                if (actionOutputMessage.isOutputEvent()) {
-                    output.collect(outputTag, reusedOutput.replace(actionOutputMessage));
-                } else {
-                    List<Action> pengdingActions =
-                            workflowPlan.getAction(actionOutputMessage.getEventType());
-                    addPendingActionCount(
-                            key, pengdingActions == null ? 0 : pengdingActions.size());
-                    output.collect(reused.replace(actionOutputMessage));
+                    if (actionOutputMessage.isOutputEvent()) {
+                        output.collect(outputTag, reusedOutput.replace(actionOutputMessage));
+                    } else {
+                        List<Action> pengdingActions =
+                                workflowPlan.getAction(actionOutputMessage.getEventType());
+                        addPendingActionCount(
+                                key, pengdingActions == null ? 0 : pengdingActions.size());
+                        output.collect(reused.replace(actionOutputMessage));
+                    }
                 }
+                addPendingActionCount(key, -1);
             }
         }
     }
@@ -120,6 +133,11 @@ public class FunctionGroupOperator<K> extends AbstractStreamOperator<DataMessage
         this.backPressureValve = new ThresholdBackPressureValve(100);
         initInterpreter();
 
+        MapStateDescriptor<K, RunnerContext> runnerContextsDescriptor =
+                new MapStateDescriptor<>(
+                        "runnerContexts", keyTypeInfo, TypeInformation.of(RunnerContext.class));
+        runnerContexts = getRuntimeContext().getMapState(runnerContextsDescriptor);
+
         MapStateDescriptor<K, Integer> key2pendingActionCountDescriptor =
                 new MapStateDescriptor<>(
                         "key2pendingActionCount", keyTypeInfo, TypeInformation.of(Integer.class));
@@ -130,7 +148,7 @@ public class FunctionGroupOperator<K> extends AbstractStreamOperator<DataMessage
         pendingInputEvents = getRuntimeContext().getListState(pendingInputEventsDescriptor);
 
         processingTimeService.registerTimer(
-                processingTimeService.getCurrentProcessingTime() + 3000,
+                processingTimeService.getCurrentProcessingTime() + 1000,
                 (long timestamp) -> {
                     processPendingInputEventsAndRegisterTimer();
                 });
@@ -170,7 +188,7 @@ public class FunctionGroupOperator<K> extends AbstractStreamOperator<DataMessage
                     int delta = pendingActions == null ? 0 : pendingActions.size();
                     addPendingActionCount(dataMessage.getKey(), delta);
                     mailboxExecutor.submit(
-                            () -> this.processElement(new StreamRecord<>(dataMessage)),
+                            () -> this.processElementWithoutPending(dataMessage),
                             "process pending input event");
                 } else {
                     continuePendingInputEvents.add(dataMessage);
@@ -179,7 +197,7 @@ public class FunctionGroupOperator<K> extends AbstractStreamOperator<DataMessage
             pendingInputEvents.update(continuePendingInputEvents);
 
             processingTimeService.registerTimer(
-                    processingTimeService.getCurrentProcessingTime() + 3000,
+                    processingTimeService.getCurrentProcessingTime() + 1000,
                     (long timestamp) -> {
                         processPendingInputEventsAndRegisterTimer();
                     });
@@ -212,29 +230,39 @@ public class FunctionGroupOperator<K> extends AbstractStreamOperator<DataMessage
         PythonInterpreterConfig config =
                 PythonInterpreterConfig.newBuilder()
                         .setPythonExec(
-                                "/Users/huangxu/Downloads/flink-agents-poc-python/pythonProject/.venv/bin/python") // specify python exec, use "python" on Windows
+                                "/Users/youjin/Project/github/operator/flink-agents/python/.venv/bin/python") // specify python exec, use "python" on Windows
                         .addPythonPaths(
-                                "/Users/huangxu/Desktop/codingspace/flink-agents/python:/Users/huangxu/Downloads/flink-agents-poc-python/pythonProject/.venv/lib/python3.10/site-packages")
+                                "/Users/youjin/Project/github/operator/flink-agents/python:/Users/youjin/Project/github/operator/flink-agents/python/.venv/lib/python3.10/site-packages")
                         .build();
         this.interpreter = new PythonInterpreter(config);
+        interpreter.exec("from flink_agents.runtime import runner_context");
     }
 
-    private DataMessage<K> executePythonFunction(
-            PythonFunction pythonFunction, DataMessage<K> inputMessage)
-            throws JsonProcessingException {
+    private List executePythonFunction(
+            PythonFunction pythonFunction, DataMessage<K> inputMessage) throws Exception {
         int lastIndexOf = pythonFunction.getModule().lastIndexOf(".");
         String s1 = pythonFunction.getModule().substring(0, lastIndexOf);
         String s2 = pythonFunction.getModule().substring(lastIndexOf + 1);
         interpreter.exec("from " + s1 + " import " + s2);
-        Object invoked =
-                interpreter.invoke(pythonFunction.getQualName(), inputMessage.getPayload());
 
-        ObjectMapper mapper = new ObjectMapper();
+        K key = inputMessage.getKey();
+        RunnerContext<K> runnerContext = runnerContexts.get(key);
+        if (runnerContext == null) {
+            runnerContext = new RunnerContext<>(key);
+            runnerContexts.put(key, runnerContext);
+        }
 
-        PythonFunctionInvokeResult invokeResult =
-                mapper.readValue(invoked.toString(), PythonFunctionInvokeResult.class);
-        return new PythonDataMessage<>(
-                invokeResult.eventType, inputMessage.getKey(), invokeResult.payload.getBytes());
+        Object pythonRunnerContext = interpreter.invoke("runner_context.get_runner_context", inputMessage.getKey(), runnerContext);
+
+        if (inputMessage.isInputEvent()) {
+            Object payload = interpreter.invoke("runner_context.get_input_event", inputMessage.getPayload());
+            interpreter.invoke(pythonFunction.getQualName(), payload, pythonRunnerContext);
+        } else {
+            Object payload = interpreter.invoke("runner_context.get_python_object", inputMessage.getPayload());
+            interpreter.invoke(pythonFunction.getQualName(), payload, pythonRunnerContext);
+        }
+
+        return runnerContext.getAllEvents();
     }
 
     private static class PythonFunctionInvokeResult {

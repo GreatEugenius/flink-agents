@@ -33,7 +33,8 @@ public class PythonRunner {
 
     public PythonRunner(PythonEnvironmentManager environmentManager) throws Exception {
         environmentManager.open();
-        EmbeddedPythonEnvironment env = (EmbeddedPythonEnvironment) environmentManager.createEnvironment();
+        EmbeddedPythonEnvironment env =
+                (EmbeddedPythonEnvironment) environmentManager.createEnvironment();
 
         interpreter = env.getInterpreter();
         interpreter.exec("from flink_agents.runtime import flink_runner_context");
@@ -44,19 +45,27 @@ public class PythonRunner {
         String packagePath = pythonFunction.getModule().substring(0, moduleLastDotIndex);
         String className = pythonFunction.getModule().substring(moduleLastDotIndex + 1);
 
-        interpreter.exec("from " + packagePath + " import " + className);
-
         Object eventKey = inputMessage.getKey();
         runnerContext.setKey(eventKey);
 
-        Object pythonRunnerContextObject =
-                interpreter.invoke("flink_runner_context.get_runner_context", runnerContext);
+        try {
+            interpreter.exec("from " + packagePath + " import " + className);
 
-        Object pythonEventObject =
-                interpreter.invoke(
-                        "flink_runner_context.get_python_object", inputMessage.getPayload());
+            Object pythonRunnerContextObject =
+                    interpreter.invoke(
+                            "flink_runner_context.create_flink_runner_context", runnerContext);
 
-        interpreter.invoke(pythonFunction.getQualName(), pythonEventObject, pythonRunnerContextObject);
+            Object pythonEventObject =
+                    interpreter.invoke(
+                            "flink_runner_context.convert_to_python_object",
+                            inputMessage.getPayload());
+
+            interpreter.invoke(
+                    pythonFunction.getQualName(), pythonEventObject, pythonRunnerContextObject);
+        } catch (Exception e) {
+            throw new RuntimeException(
+                    "Failed to execute Python function: " + pythonFunction.getQualName(), e);
+        }
 
         return runnerContext.getAllEvents();
     }

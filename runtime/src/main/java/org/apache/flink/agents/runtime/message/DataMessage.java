@@ -21,7 +21,13 @@ package org.apache.flink.agents.runtime.message;
 import java.io.Serializable;
 import java.util.OptionalLong;
 
-/** Specific message type for event. */
+/**
+ * A special type used to wrap {@link org.apache.flink.agents.api.Event}, which must include an
+ * event type, a key and the actual data. This type will be used for data transmission between Flink
+ * operators.
+ *
+ * @param <K> The type of the key.
+ */
 public abstract class DataMessage<K> implements Message, Serializable {
 
     protected static final long serialVersionUID = 1L;
@@ -48,13 +54,5 @@ public abstract class DataMessage<K> implements Message, Serializable {
     @Override
     public OptionalLong isBarrierMessage() {
         return OptionalLong.empty();
-    }
-
-    public boolean isInputEvent() {
-        return eventType.equals("flink_agents.api.event.InputEvent");
-    }
-
-    public boolean isOutputEvent() {
-        return eventType.equals("flink_agents.api.event.OutputEvent");
     }
 }

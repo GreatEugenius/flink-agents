@@ -19,7 +19,11 @@ package org.apache.flink.agents.runtime.message;
 
 import java.util.Arrays;
 
-/** Specific message type for python event. */
+/**
+ * PythonEventMessage is a {@link EventMessage} with a python payload of type {@link byte} array.
+ *
+ * @param <K> The type of the key.
+ */
 public class PythonDataMessage<K> extends DataMessage<K> {
 
     private final byte[] payload;

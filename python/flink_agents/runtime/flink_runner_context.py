@@ -25,17 +25,21 @@ from flink_agents.api.runner_context import RunnerContext
 
 
 def create_flink_runner_context(j_runner_context: Any):
-    """Used to create a FlinkRunnerContext Python object in a Java environment."""
+    """Used to create a FlinkRunnerContext Python object in Pemja environment."""
     return FlinkRunnerContext(j_runner_context)
 
+
 def convert_to_python_object(bytesObject: bytes):
+    """Used for deserializing Python objects."""
     return cloudpickle.loads(bytesObject)
+
 
 class FlinkRunnerContext(RunnerContext):
     """Providing context for workflow execution in Flink Environment.
 
     This context allows access to event handling.
     """
+
     def __init__(self, j_runner_context: Any):
         self._j_runner_context = j_runner_context
 

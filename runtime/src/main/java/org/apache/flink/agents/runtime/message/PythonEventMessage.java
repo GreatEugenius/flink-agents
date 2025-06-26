@@ -20,28 +20,23 @@ package org.apache.flink.agents.runtime.message;
 import java.util.Arrays;
 
 /**
- * PythonEventMessage is a {@link EventMessage} with a python payload of type {@link byte} array.
+ * PythonEventMessage is a {@link EventMessage} that carries a Python event in byte array format.
  *
  * @param <K> The type of the key.
  */
-public class PythonDataMessage<K> extends DataMessage<K> {
+public class PythonEventMessage<K> extends EventMessage<K, byte[]> {
 
-    private final byte[] payload;
+    private static final long serialVersionUID = 1L;
 
-    public PythonDataMessage(String eventType, K key, byte[] payload) {
-        super(eventType, key);
-        this.payload = payload;
-    }
-
-    public byte[] getPayload() {
-        return payload;
+    public PythonEventMessage(K key, byte[] event, String eventType) {
+        super(key, event, eventType);
     }
 
     @Override
     public String toString() {
-        return "PythonDataMessage{"
+        return "PythonEventMessage{"
                 + "payload="
-                + Arrays.toString(payload)
+                + Arrays.toString(event)
                 + ", eventType='"
                 + eventType
                 + '\''

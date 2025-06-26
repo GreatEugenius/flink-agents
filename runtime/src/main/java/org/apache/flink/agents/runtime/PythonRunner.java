@@ -21,7 +21,7 @@ import org.apache.flink.agents.plan.PythonFunction;
 import org.apache.flink.agents.runtime.context.PythonRunnerContext;
 import org.apache.flink.agents.runtime.env.EmbeddedPythonEnvironment;
 import org.apache.flink.agents.runtime.env.PythonEnvironmentManager;
-import org.apache.flink.agents.runtime.message.DataMessage;
+import org.apache.flink.agents.runtime.message.PythonEventMessage;
 import pemja.core.PythonInterpreter;
 
 import java.util.List;
@@ -40,10 +40,17 @@ public class PythonRunner {
         interpreter.exec("from flink_agents.runtime import flink_runner_context");
     }
 
-    public List executePythonFunction(PythonFunction pythonFunction, DataMessage<?> inputMessage) {
-        int moduleLastDotIndex = pythonFunction.getModule().lastIndexOf(".");
-        String packagePath = pythonFunction.getModule().substring(0, moduleLastDotIndex);
-        String className = pythonFunction.getModule().substring(moduleLastDotIndex + 1);
+    public List executePythonFunction(
+            PythonFunction pythonFunction, PythonEventMessage<?> inputMessage) {
+        String modulePath = pythonFunction.getModule();
+        int moduleLastDotIndex = modulePath.lastIndexOf(".");
+        if (moduleLastDotIndex == -1) {
+            throw new IllegalArgumentException(
+                    "Invalid Python module path: " + pythonFunction.getModule());
+        }
+
+        String packagePath = modulePath.substring(0, moduleLastDotIndex);
+        String className = modulePath.substring(moduleLastDotIndex + 1);
 
         Object eventKey = inputMessage.getKey();
         runnerContext.setKey(eventKey);
@@ -58,7 +65,7 @@ public class PythonRunner {
             Object pythonEventObject =
                     interpreter.invoke(
                             "flink_runner_context.convert_to_python_object",
-                            inputMessage.getPayload());
+                            inputMessage.getEvent());
 
             interpreter.invoke(
                     pythonFunction.getQualName(), pythonEventObject, pythonRunnerContextObject);

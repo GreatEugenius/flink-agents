@@ -17,8 +17,8 @@
  */
 package org.apache.flink.agents.runtime.context;
 
-import org.apache.flink.agents.runtime.message.DataMessage;
-import org.apache.flink.agents.runtime.message.PythonDataMessage;
+import org.apache.flink.agents.runtime.message.EventMessage;
+import org.apache.flink.agents.runtime.message.PythonEventMessage;
 
 import javax.annotation.concurrent.NotThreadSafe;
 
@@ -26,29 +26,14 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Implementation of the runner context on the Python side.
- *
- * <p>This class is used to manage the execution context when interacting with Python functions,
- * including setting a key for event correlation and collecting output events during execution.
- *
- * <p><b>Note:</b> This class is <i>not thread-safe</i>. External synchronization is required when
- * used in a multi-threaded environment.
- *
- * <h3>Usage Requirements</h3>
- *
- * <ol>
- *   <li>{@link #setKey(Object)} must be called before any other operations.
- *   <li>{@link #getAllEvents()} should be called at the end to retrieve and clear all collected
- *       events.
- * </ol>
- *
- * <p>The {@link #getAllEvents()} method clears the internal event list after retrieval, which has a
- * side effect. Be cautious when calling it concurrently without synchronization.
+ * This class is used to manage the execution context when interacting with Python functions,
+ * including temporarily saving the key of the current Event and collecting new events generated
+ * during the execution of actions.
  */
 @NotThreadSafe
 public class PythonRunnerContext {
     private Object key;
-    private List<DataMessage<?>> events;
+    private List<EventMessage<?, ?>> events;
 
     public PythonRunnerContext() {
         this(null);
@@ -61,18 +46,23 @@ public class PythonRunnerContext {
 
     public void setKey(Object key) {
         this.key = key;
+        clearAllEvents();
     }
 
     public void sendEvent(String type, byte[] event) {
         if (key == null) {
             throw new IllegalStateException("Key is not set.");
         }
-        this.events.add(new PythonDataMessage<>(type, key, event));
+        this.events.add(new PythonEventMessage<>(key, event, type));
     }
 
-    public List<DataMessage<?>> getAllEvents() {
-        List<DataMessage<?>> list = new ArrayList<>(this.events);
-        this.events.clear();
+    public List<EventMessage<?, ?>> getAllEvents() {
+        List<EventMessage<?, ?>> list = new ArrayList<>(this.events);
+        clearAllEvents();
         return list;
+    }
+
+    private void clearAllEvents() {
+        this.events.clear();
     }
 }

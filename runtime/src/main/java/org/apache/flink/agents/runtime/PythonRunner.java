@@ -28,6 +28,14 @@ import java.util.List;
 
 /** Execute the corresponding Python action in the workflow. */
 public class PythonRunner {
+
+    private static final String IMPORT_FLINK_RUNNER_CONTEXT =
+            "from flink_agents.runtime import flink_runner_context";
+    private static final String CREATE_FLINK_RUNNER_CONTEXT =
+            "flink_runner_context.create_flink_runner_context";
+    private static final String CONVERT_TO_PYTHON_OBJECT =
+            "flink_runner_context.convert_to_python_object";
+
     private PythonInterpreter interpreter;
     private PythonRunnerContext runnerContext;
 
@@ -37,7 +45,7 @@ public class PythonRunner {
                 (EmbeddedPythonEnvironment) environmentManager.createEnvironment();
 
         interpreter = env.getInterpreter();
-        interpreter.exec("from flink_agents.runtime import flink_runner_context");
+        interpreter.exec(IMPORT_FLINK_RUNNER_CONTEXT);
     }
 
     public List executePythonFunction(
@@ -54,18 +62,16 @@ public class PythonRunner {
 
         Object eventKey = inputMessage.getKey();
         runnerContext.setKey(eventKey);
+        runnerContext.clearAllEvents();
 
         try {
             interpreter.exec("from " + packagePath + " import " + className);
 
             Object pythonRunnerContextObject =
-                    interpreter.invoke(
-                            "flink_runner_context.create_flink_runner_context", runnerContext);
+                    interpreter.invoke(CREATE_FLINK_RUNNER_CONTEXT, runnerContext);
 
             Object pythonEventObject =
-                    interpreter.invoke(
-                            "flink_runner_context.convert_to_python_object",
-                            inputMessage.getEvent());
+                    interpreter.invoke(CONVERT_TO_PYTHON_OBJECT, inputMessage.getEvent());
 
             interpreter.invoke(
                     pythonFunction.getQualName(), pythonEventObject, pythonRunnerContextObject);
@@ -74,6 +80,6 @@ public class PythonRunner {
                     "Failed to execute Python function: " + pythonFunction.getQualName(), e);
         }
 
-        return runnerContext.getAllEvents();
+        return runnerContext.drainEvents();
     }
 }

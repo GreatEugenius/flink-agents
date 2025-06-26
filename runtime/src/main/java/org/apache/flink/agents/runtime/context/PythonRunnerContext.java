@@ -46,7 +46,6 @@ public class PythonRunnerContext {
 
     public void setKey(Object key) {
         this.key = key;
-        clearAllEvents();
     }
 
     public void sendEvent(String type, byte[] event) {
@@ -56,13 +55,13 @@ public class PythonRunnerContext {
         this.events.add(new PythonEventMessage<>(key, event, type));
     }
 
-    public List<EventMessage<?, ?>> getAllEvents() {
+    public List<EventMessage<?, ?>> drainEvents() {
         List<EventMessage<?, ?>> list = new ArrayList<>(this.events);
         clearAllEvents();
         return list;
     }
 
-    private void clearAllEvents() {
+    public void clearAllEvents() {
         this.events.clear();
     }
 }

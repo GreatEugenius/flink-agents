@@ -121,6 +121,7 @@ public class ActionExecutionOperator<IN, OUT> extends AbstractStreamOperator<OUT
         events.push(inputEvent);
         while (!events.isEmpty()) {
             Event event = events.pop();
+            builtInMetricGroup.markEventOccurred();
             List<Action> actions = getActionsTriggeredBy(event);
             if (actions != null && !actions.isEmpty()) {
                 for (Action action : actions) {
@@ -134,6 +135,7 @@ public class ActionExecutionOperator<IN, OUT> extends AbstractStreamOperator<OUT
                     LOG.debug("Try execute action {} for event {}.", actionName, event);
                     ActionMetricGroup actionMetricGroup =
                             builtInMetricGroup.getActionMetricGroup(actionName);
+                    builtInMetricGroup.markActionExecuting(actionName);
                     List<Event> actionOutputEvents;
                     if (action.getExec() instanceof JavaFunction) {
                         runnerContext.setActionMetricGroup(actionMetricGroup);
@@ -149,9 +151,11 @@ public class ActionExecutionOperator<IN, OUT> extends AbstractStreamOperator<OUT
                     } else {
                         throw new RuntimeException("Unsupported action type: " + action.getClass());
                     }
+                    builtInMetricGroup.markActionExecuted(actionName);
 
                     for (Event actionOutputEvent : actionOutputEvents) {
                         if (EventUtil.isOutputEvent(actionOutputEvent)) {
+                            builtInMetricGroup.markEventOccurred();
                             OUT outputData = getOutputFromOutputEvent(actionOutputEvent);
                             LOG.debug(
                                     "Collect output data {} for input {} in action {}.",

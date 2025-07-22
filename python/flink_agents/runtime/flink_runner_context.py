@@ -24,6 +24,7 @@ from flink_agents.api.event import Event
 from flink_agents.api.resource import Resource, ResourceType
 from flink_agents.api.runner_context import RunnerContext
 from flink_agents.plan.agent_plan import AgentPlan
+from flink_agents.runtime.flink_metric_group import FlinkMetricGroup
 
 
 class FlinkRunnerContext(RunnerContext):
@@ -64,6 +65,28 @@ class FlinkRunnerContext(RunnerContext):
     @override
     def get_resource(self, name: str, type: ResourceType) -> Resource:
         return self.__agent_plan.get_resource(name, type)
+
+    @override
+    def get_agent_metric_group(self) -> FlinkMetricGroup:
+        """Get the metric group for flink agents.
+
+        Returns:
+        -------
+        FlinkMetricGroup
+            The metric group shared across all actions.
+        """
+        return FlinkMetricGroup(self._j_runner_context.getAgentMetricGroup())
+
+    @override
+    def get_action_metric_group(self) -> FlinkMetricGroup:
+        """Get the individual metric group dedicated for each action.
+
+        Returns:
+        -------
+        FlinkMetricGroup
+            The individual metric group specific to the current action.
+        """
+        return FlinkMetricGroup(self._j_runner_context.getActionMetricGroup())
 
 def create_flink_runner_context(j_runner_context: Any, agent_plan_json: str) -> FlinkRunnerContext:
     """Used to create a FlinkRunnerContext Python object in Pemja environment."""

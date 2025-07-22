@@ -20,6 +20,8 @@ package org.apache.flink.agents.runtime.context;
 import org.apache.flink.agents.api.Event;
 import org.apache.flink.agents.api.context.RunnerContext;
 import org.apache.flink.agents.plan.utils.JsonUtils;
+import org.apache.flink.agents.runtime.metrics.ActionMetricGroup;
+import org.apache.flink.agents.runtime.metrics.FlinkAgentsMetricGroupImpl;
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.core.JsonProcessingException;
 import org.apache.flink.util.Preconditions;
 
@@ -33,6 +35,30 @@ import java.util.List;
 public class RunnerContextImpl implements RunnerContext {
 
     protected final List<Event> pendingEvents = new ArrayList<>();
+
+    protected transient FlinkAgentsMetricGroupImpl agentMetricGroup;
+
+    protected transient ActionMetricGroup actionMetricGroup;
+
+    public void setAgentMetricGroup(FlinkAgentsMetricGroupImpl agentMetricGroup) {
+        this.agentMetricGroup = agentMetricGroup;
+    }
+
+    public void setActionMetricGroup(ActionMetricGroup actionMetricGroup) {
+        this.actionMetricGroup = actionMetricGroup;
+    }
+
+    @Override
+    public FlinkAgentsMetricGroupImpl getAgentMetricGroup() {
+        Preconditions.checkNotNull(agentMetricGroup, "Agent Metric Group is not set.");
+        return agentMetricGroup;
+    }
+
+    @Override
+    public ActionMetricGroup getActionMetricGroup() {
+        Preconditions.checkNotNull(agentMetricGroup, "Action Metric Group is not set.");
+        return actionMetricGroup;
+    }
 
     @Override
     public void sendEvent(Event event) {

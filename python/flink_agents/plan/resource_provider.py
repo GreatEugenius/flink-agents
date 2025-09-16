@@ -105,8 +105,9 @@ class PythonResourceProvider(ResourceProvider):
         final_kwargs.update(self.kwargs)
         final_kwargs.update(resource_class_config)
         final_kwargs.update(resource_config)
+        final_kwargs.update(name=self.name, get_resource=get_resource)
 
-        resource = cls(**final_kwargs, get_resource=get_resource)
+        resource = cls(**final_kwargs)
         return resource
 
 

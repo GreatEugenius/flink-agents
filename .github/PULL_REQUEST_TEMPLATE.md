@@ -20,4 +20,7 @@ Linked issue: #xxx
 
 ### Documentation
 
-<!-- Should this change be covered by the user documentation?-->
+<!-- DO NOT REMOVE THIS SECTION. CHECK THE PROPER BOX ONLY. -->
+
+- [ ] `doc-needed` <!-- Your PR changes impact docs -->
+- [ ] `doc-not-needed` <!-- Your PR changes do not impact docs -->

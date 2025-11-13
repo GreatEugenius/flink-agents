@@ -20,7 +20,7 @@
 name: "Documentation Bot"
 
 on:
-  pull_request_target :
+  pull_request_target:
     types:
       - opened
       - edited
@@ -37,7 +37,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Labeling
-        uses: apache/pulsar-test-infra/docbot@master
+        uses: apache/pulsar-test-infra/docbot@8ff059e
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           LABEL_WATCH_LIST: 'doc-needed,doc-not-needed'

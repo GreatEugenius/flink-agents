@@ -22,5 +22,5 @@ Linked issue: #xxx
 
 <!-- Do not remove this section. Check the proper box only. -->
 
-- [ ] `doc-needed` <!-- Your PR changes impact docs -->
-- [ ] `doc-not-needed` <!-- Your PR changes do not impact docs -->
+- [ ] `doc-needed`
+- [ ] `doc-not-needed`

@@ -44,6 +44,7 @@ public class ChatModelIntegrationTest extends OllamaPreparationUtils {
 
     private static final String API_KEY = "_API_KEY";
     private static final String OLLAMA = "OLLAMA";
+    private static final String PYTHON = "PYTHON";
 
     private final boolean ollamaReady;
 
@@ -52,10 +53,10 @@ public class ChatModelIntegrationTest extends OllamaPreparationUtils {
     }
 
     @ParameterizedTest()
-    @ValueSource(strings = {"OLLAMA", "AZURE"})
+    @ValueSource(strings = {"OLLAMA", "AZURE", "PYTHON"})
     public void testChatModeIntegration(String provider) throws Exception {
         Assumptions.assumeTrue(
-                (OLLAMA.equals(provider) && ollamaReady)
+                ((OLLAMA.equals(provider) || PYTHON.equals(provider)) && ollamaReady)
                         || System.getenv().get(provider + API_KEY) != null,
                 String.format(
                         "Server or authentication information is not provided for %s", provider));
@@ -102,7 +103,7 @@ public class ChatModelIntegrationTest extends OllamaPreparationUtils {
 
     public void checkResult(CloseableIterator<Object> results) {
         List<String> expectedWords =
-                List.of(" 77", "37", "89", "23", "68", "22", "26", "22", "23", "");
+                List.of("77", "37", "89", "23", "68", "22", "26", "22", "23", "");
         for (String expected : expectedWords) {
             Assertions.assertTrue(
                     results.hasNext(), "Output messages count %s is less than expected.");

@@ -118,3 +118,4 @@ jobs:
         run: bash tools/build.sh
       - name: Run e2e tests
         run: bash tools/e2e.sh
+

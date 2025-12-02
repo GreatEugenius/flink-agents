@@ -122,13 +122,12 @@ jobs:
         run: tools/ut.sh -p -e
 
   java_it_tests:
-    name: it-java [${{ matrix.os }}] [${{ matrix.python-version}}]
+    name: it-java [${{ matrix.os }}]
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ 'ubuntu-latest' ]
-        python-version: [ '3.11' ]
     steps:
       - uses: actions/checkout@v4
       - name: Install java
@@ -139,7 +138,7 @@ jobs:
       - name: Install python
         uses: actions/setup-python@v4
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: '3.11'
       - name: Install uv
         uses: astral-sh/setup-uv@v4
         with:
@@ -147,12 +146,15 @@ jobs:
       - name: Install flink-agents
         run: |
           bash tools/build.sh
-          cd python
-          pip install dist/*.whl
+          export PYTHONPATH="${{ github.workspace }}/python/.venv/lib/python3.11/site-packages:$PYTHONPATH"
+          echo "PYTHONPATH: $PYTHONPATH"
+          python -c "import flink_agents; print('flink-agents imported successfully')"
       - name: Install ollama
         run: bash tools/start_ollama_server.sh
       - name: Run Java IT
-        run: tools/ut.sh -j -e
+        run: |
+          export PYTHONPATH="${{ github.workspace }}/python/.venv/lib/python3.11/site-packages:$PYTHONPATH"
+          tools/ut.sh -j -e
 
   cross_language_tests:
     name: cross-language [${{ matrix.os }}] [${{ matrix.python-version}}]

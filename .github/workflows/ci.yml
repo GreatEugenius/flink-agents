@@ -122,12 +122,13 @@ jobs:
         run: tools/ut.sh -p -e
 
   java_it_tests:
-    name: it-java [${{ matrix.os }}]
+    name: it-java [${{ matrix.os }}] [${{ matrix.python-version}}]
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ 'ubuntu-latest' ]
+        python-version: [ '3.11' ]
     steps:
       - uses: actions/checkout@v4
       - name: Install java
@@ -144,7 +145,10 @@ jobs:
         with:
           version: "latest"
       - name: Install flink-agents
-        run: bash tools/build.sh
+        run: |
+          bash tools/build.sh
+          cd python
+          pip install dist/*.whl
       - name: Install ollama
         run: bash tools/start_ollama_server.sh
       - name: Run Java IT

@@ -17,19 +17,14 @@
 #################################################################################
 from typing import Any, Dict, List, Sequence
 
-from pydantic import Field
 from typing_extensions import override
 
 from flink_agents.api.chat_message import ChatMessage, MessageRole
-from flink_agents.api.chat_models.chat_model import (
-    BaseChatModelConnection,
-    BaseChatModelSetup,
-)
 from flink_agents.api.chat_models.java_chat_model import (
     JavaChatModelConnection,
     JavaChatModelSetup,
 )
-from flink_agents.api.resource import JavaResourceWrapper
+
 from flink_agents.api.tools.tool import Tool
 from flink_agents.runtime.python_java_utils import (
     to_java_chat_message,
@@ -134,7 +129,7 @@ class JavaChatModelSetupImpl(JavaChatModelSetup):
         # Convert Python messages to Java format
         java_messages = []
         for message in messages:
-            java_messages.append(self._j_resource_adapter.fromPythonChatMessage(message))
+            java_messages.append(to_java_chat_message(message))
         j_response_message = self._j_resource.chat(java_messages, kwargs)
 
         # Convert Java response back to Python format

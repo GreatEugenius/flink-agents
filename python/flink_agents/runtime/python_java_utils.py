@@ -137,7 +137,9 @@ def from_java_chat_message(j_chat_message: Any) -> ChatMessage:
 
 def to_java_chat_message(chat_message: ChatMessage) -> Any:
     """Convert a chat message to a java chat message."""
+    print("Begin findClass ChatMessage")
     j_ChatMessage = findClass("org.apache.flink.agents.api.chat.messages.ChatMessage")
+    print("findClass ChatMessage finished")
     j_chat_message = j_ChatMessage()
 
     j_MessageRole = findClass("org.apache.flink.agents.api.chat.messages.MessageRole")

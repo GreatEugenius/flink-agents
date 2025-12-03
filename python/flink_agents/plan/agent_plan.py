@@ -20,7 +20,7 @@ from typing import Any, Dict, List, cast
 from pydantic import BaseModel, field_serializer, model_validator
 
 from flink_agents.api.agent import Agent
-from flink_agents.api.resource import Resource, ResourceType
+from flink_agents.api.resource import Resource, ResourceType, JavaResourceWrapper
 from flink_agents.api.tools.mcp import MCPServer
 from flink_agents.plan.actions.action import Action
 from flink_agents.plan.actions.chat_model_action import CHAT_MODEL_ACTION
@@ -58,6 +58,7 @@ class AgentPlan(BaseModel):
     resource_providers: Dict[ResourceType, Dict[str, ResourceProvider]] | None = None
     config: AgentConfiguration | None = None
     __resources: Dict[ResourceType, Dict[str, Resource]] = {}
+    __j_resource_adapter: Any = None
 
     @field_serializer("resource_providers")
     def __serialize_resource_providers(
@@ -210,11 +211,22 @@ class AgentPlan(BaseModel):
             self.__resources[type] = {}
         if name not in self.__resources[type]:
             resource_provider = self.resource_providers[type][name]
+            if isinstance(resource_provider, JavaResourceProvider):
+                resource_provider.set_java_resource_adapter(self.__j_resource_adapter)
             resource = resource_provider.provide(
                 get_resource=self.get_resource, config=self.config
             )
             self.__resources[type][name] = resource
         return self.__resources[type][name]
+
+    def set_java_resource_adapter(self, j_resource_adapter: Any):
+        """Set java resource adapter for java resource provider.
+        Parameters
+        ----------
+        j_resource_adapter : Any
+            The java resource adapter.
+        """
+        self.__j_resource_adapter = j_resource_adapter
 
 
 def _get_actions(agent: Agent) -> List[Action]:
@@ -284,9 +296,15 @@ def _get_resource_providers(agent: Agent) -> List[ResourceProvider]:
                 value = value.__func__
 
             if callable(value):
-                resource_providers.append(
-                    PythonResourceProvider.get(name=name, descriptor=value())
-                )
+                descriptor = value()
+                if issubclass(descriptor.clazz, JavaResourceWrapper):
+                    resource_providers.append(
+                        JavaResourceProvider.get(name=name, descriptor=value())
+                    )
+                else:
+                    resource_providers.append(
+                        PythonResourceProvider.get(name=name, descriptor=value())
+                    )
 
         elif hasattr(value, "_is_tool"):
             if isinstance(value, staticmethod):
@@ -341,9 +359,14 @@ def _get_resource_providers(agent: Agent) -> List[ResourceProvider]:
         ResourceType.VECTOR_STORE,
     ]:
         for name, descriptor in agent.resources[resource_type].items():
-            resource_providers.append(
-                PythonResourceProvider.get(name=name, descriptor=descriptor)
-            )
+            if issubclass(descriptor.clazz, JavaResourceWrapper):
+                resource_providers.append(
+                    JavaResourceProvider.get(name=name, descriptor=descriptor)
+                )
+            else:
+                resource_providers.append(
+                    PythonResourceProvider.get(name=name, descriptor=descriptor)
+                )
 
     return resource_providers
 

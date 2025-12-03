@@ -21,6 +21,8 @@ package org.apache.flink.agents.plan.resourceprovider;
 import org.apache.flink.agents.api.resource.Resource;
 import org.apache.flink.agents.api.resource.ResourceType;
 import org.apache.flink.agents.api.resource.SerializableResource;
+import org.apache.flink.agents.plan.PythonPrompt;
+import org.apache.flink.agents.plan.PythonTool;
 
 import java.util.Map;
 import java.util.Objects;
@@ -68,11 +70,15 @@ public class PythonSerializableResourceProvider extends SerializableResourceProv
     @Override
     public Resource provide(BiFunction<String, ResourceType, Resource> getResource)
             throws Exception {
-        // TODO: Implement Python resource deserialization logic
-        // This would typically involve calling into Python runtime to deserialize the
-        // resource
-        throw new UnsupportedOperationException(
-                "Python resource deserialization not yet implemented in Java runtime");
+        if (resource == null) {
+            if (this.getType() == ResourceType.PROMPT) {
+                resource = PythonPrompt.fromSerializedMap(serialized);
+            }
+            if (this.getType() == ResourceType.TOOL) {
+                resource = PythonTool.fromSerializedMap(serialized);
+            }
+        }
+        return resource;
     }
 
     @Override

@@ -18,6 +18,7 @@
 package org.apache.flink.agents.runtime.python.utils;
 
 import org.apache.flink.agents.plan.PythonFunction;
+import org.apache.flink.agents.plan.resourceprovider.JavaResourceAdapter;
 import org.apache.flink.agents.runtime.context.RunnerContextImpl;
 import org.apache.flink.agents.runtime.python.event.PythonEvent;
 import org.apache.flink.agents.runtime.utils.EventUtil;
@@ -59,11 +60,22 @@ public class PythonActionExecutor {
 
     private final PythonInterpreter interpreter;
     private final String agentPlanJson;
+    private final JavaResourceAdapter javaResourceAdapter;
     private Object pythonAsyncThreadPool;
 
     public PythonActionExecutor(PythonInterpreter interpreter, String agentPlanJson) {
         this.interpreter = interpreter;
         this.agentPlanJson = agentPlanJson;
+        this.javaResourceAdapter = null;
+    }
+
+    public PythonActionExecutor(
+            PythonInterpreter interpreter,
+            String agentPlanJson,
+            JavaResourceAdapter javaResourceAdapter) {
+        this.interpreter = interpreter;
+        this.agentPlanJson = agentPlanJson;
+        this.javaResourceAdapter = javaResourceAdapter;
     }
 
     public void open() throws Exception {
@@ -93,7 +105,8 @@ public class PythonActionExecutor {
                         CREATE_FLINK_RUNNER_CONTEXT,
                         runnerContext,
                         agentPlanJson,
-                        pythonAsyncThreadPool);
+                        pythonAsyncThreadPool,
+                        javaResourceAdapter);
 
         Object pythonEventObject = interpreter.invoke(CONVERT_TO_PYTHON_OBJECT, event.getEvent());
 

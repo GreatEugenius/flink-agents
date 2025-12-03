@@ -93,3 +93,18 @@ class ResourceDescriptor:
     def arguments(self) -> Dict[str, Any]:
         """Get the initialize arguments of the resource."""
         return self._arguments
+
+class JavaResourceWrapper:
+    """Wrapper interface for Java resource objects.
+
+    This interface provides a unified way to access the underlying Java resource
+    from Python objects that encapsulate Java functionality.
+    """
+
+    @abstractmethod
+    def get_java_resource(self) -> Any:
+        """Retrieves the underlying Java resource object.
+
+        Returns:
+            The wrapped Java resource object
+        """

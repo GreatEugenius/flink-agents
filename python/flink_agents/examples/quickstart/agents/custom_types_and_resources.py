@@ -20,6 +20,7 @@ from typing import List
 from pydantic import BaseModel
 
 from flink_agents.api.chat_message import ChatMessage, MessageRole
+from flink_agents.api.chat_models.java_chat_model import JavaChatModelConnection
 from flink_agents.api.prompts.prompt import Prompt
 from flink_agents.api.resource import ResourceDescriptor
 from flink_agents.integrations.chat_models.ollama_chat_model import (
@@ -201,5 +202,5 @@ class ProductReviewAnalysisRes(BaseModel):
 
 # ollama chat model connection descriptor
 ollama_server_descriptor = ResourceDescriptor(
-    clazz=OllamaChatModelConnection, request_timeout=120
+    clazz=JavaChatModelConnection, java_class_name="org.apache.flink.agents.integrations.chatmodels.ollama.OllamaChatModelConnection", endpoint="http://localhost:11434", requestTimeout=120
 )

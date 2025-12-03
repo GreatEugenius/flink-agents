@@ -32,6 +32,7 @@ import org.apache.flink.agents.plan.AgentPlan;
 import org.apache.flink.agents.plan.JavaFunction;
 import org.apache.flink.agents.plan.PythonFunction;
 import org.apache.flink.agents.plan.actions.Action;
+import org.apache.flink.agents.plan.resourceprovider.JavaResourceAdapter;
 import org.apache.flink.agents.plan.resourceprovider.PythonResourceProvider;
 import org.apache.flink.agents.runtime.actionstate.ActionState;
 import org.apache.flink.agents.runtime.actionstate.ActionStateStore;
@@ -551,9 +552,13 @@ public class ActionExecutionOperator<IN, OUT> extends AbstractStreamOperator<OUT
     }
 
     private void initPythonActionExecutor() throws Exception {
+        JavaResourceAdapter javaResourceAdapter =
+                new JavaResourceAdapter(agentPlan, pythonInterpreter);
         pythonActionExecutor =
                 new PythonActionExecutor(
-                        pythonInterpreter, new ObjectMapper().writeValueAsString(agentPlan));
+                        pythonInterpreter,
+                        new ObjectMapper().writeValueAsString(agentPlan),
+                        javaResourceAdapter);
         pythonActionExecutor.open();
     }
 

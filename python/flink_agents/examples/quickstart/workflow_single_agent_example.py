@@ -17,7 +17,7 @@
 #################################################################################
 from pathlib import Path
 
-from pyflink.common import Duration, WatermarkStrategy
+from pyflink.common import Duration, WatermarkStrategy, Configuration
 from pyflink.datastream import StreamExecutionEnvironment
 from pyflink.datastream.connectors.file_system import FileSource, StreamFormat
 
@@ -43,7 +43,10 @@ def main() -> None:
     integrating LLM-powered agents with Flink streaming jobs.
     """
     # Set up the Flink streaming environment and the Agents execution environment.
-    env = StreamExecutionEnvironment.get_execution_environment()
+    config = Configuration()
+    config.set_string("python.fn-execution.bundle.size", "1")
+
+    env = StreamExecutionEnvironment.get_execution_environment(config)
     agents_env = AgentsExecutionEnvironment.get_execution_environment(env)
 
     # Add Ollama chat model connection to be used by the ReviewAnalysisAgent.

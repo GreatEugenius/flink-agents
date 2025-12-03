@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING
 
 from flink_agents.api.agent import Agent
 from flink_agents.api.chat_message import ChatMessage, MessageRole
+from flink_agents.api.chat_models.java_chat_model import JavaChatModelSetup
 from flink_agents.api.decorators import (
     action,
     chat_model_setup,
@@ -84,12 +85,13 @@ class ReviewAnalysisAgent(Agent):
     def review_analysis_model() -> ResourceDescriptor:
         """ChatModel which focus on review analysis."""
         return ResourceDescriptor(
-            clazz=OllamaChatModelSetup,
+            clazz=JavaChatModelSetup,
             connection="ollama_server",
+            java_class_name="org.apache.flink.agents.integrations.chatmodels.ollama.OllamaChatModelSetup",
             model="qwen3:8b",
             prompt="review_analysis_prompt",
             tools=["notify_shipping_manager"],
-            extract_reasoning=True,
+            extract_reasoning="True",
         )
 
     @action(InputEvent)

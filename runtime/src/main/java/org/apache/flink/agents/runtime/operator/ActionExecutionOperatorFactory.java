@@ -56,8 +56,11 @@ public class ActionExecutionOperatorFactory<IN, OUT>
                         inputIsJava,
                         parameters.getProcessingTimeService(),
                         parameters.getMailboxExecutor(),
-                        actionStateStore,
-                        parameters);
+                        actionStateStore);
+        op.setup(
+                parameters.getContainingTask(),
+                parameters.getStreamConfig(),
+                parameters.getOutput());
         return (T) op;
     }
 

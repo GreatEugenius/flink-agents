@@ -87,12 +87,16 @@ public class ActionJsonSerializer extends StdSerializer<Action> {
                         .forEach(
                                 (name, value) -> {
                                     try {
-                                        jsonGenerator.writeFieldName(name);
-                                        jsonGenerator.writeStartObject();
-                                        jsonGenerator.writeStringField(
-                                                "@class", value.getClass().getName());
-                                        jsonGenerator.writeObjectField("value", value);
-                                        jsonGenerator.writeEndObject();
+                                        if (CONFIG_TYPE.equals(name)) {
+                                            jsonGenerator.writeStringField(name, (String) value);
+                                        } else {
+                                            jsonGenerator.writeFieldName(name);
+                                            jsonGenerator.writeStartObject();
+                                            jsonGenerator.writeStringField(
+                                                    "@class", value.getClass().getName());
+                                            jsonGenerator.writeObjectField("value", value);
+                                            jsonGenerator.writeEndObject();
+                                        }
                                     } catch (IOException e) {
                                         throw new RuntimeException(
                                                 "Error writing action: " + name, e);

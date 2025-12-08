@@ -63,8 +63,8 @@ import org.apache.flink.runtime.state.VoidNamespaceSerializer;
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.flink.streaming.api.operators.AbstractStreamOperator;
 import org.apache.flink.streaming.api.operators.BoundedOneInput;
-import org.apache.flink.streaming.api.operators.ChainingStrategy;
 import org.apache.flink.streaming.api.operators.OneInputStreamOperator;
+import org.apache.flink.streaming.api.operators.StreamOperatorParameters;
 import org.apache.flink.streaming.api.operators.StreamingRuntimeContext;
 import org.apache.flink.streaming.api.watermark.Watermark;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
@@ -167,11 +167,12 @@ public class ActionExecutionOperator<IN, OUT> extends AbstractStreamOperator<OUT
             Boolean inputIsJava,
             ProcessingTimeService processingTimeService,
             MailboxExecutor mailboxExecutor,
-            ActionStateStore actionStateStore) {
+            ActionStateStore actionStateStore,
+            StreamOperatorParameters<OUT> parameters) {
+        super(parameters);
         this.agentPlan = agentPlan;
         this.inputIsJava = inputIsJava;
         this.processingTimeService = processingTimeService;
-        this.chainingStrategy = ChainingStrategy.ALWAYS;
         this.mailboxExecutor = mailboxExecutor;
         this.eventLogger = EventLoggerFactory.createLogger(EventLoggerConfig.builder().build());
         this.eventListeners = new ArrayList<>();
@@ -537,6 +538,7 @@ public class ActionExecutionOperator<IN, OUT> extends AbstractStreamOperator<OUT
 
     @Override
     public void close() throws Exception {
+        System.out.println(keySegmentQueue);
         if (pythonActionExecutor != null) {
             pythonActionExecutor.close();
         }

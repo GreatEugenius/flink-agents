@@ -214,6 +214,7 @@ class ReActAgent(Agent):
     @staticmethod
     def start_action(event: InputEvent, ctx: RunnerContext) -> None:
         """Start action to format user input and send chat request event."""
+        print("start action begin")
         usr_input = event.input
 
         try:

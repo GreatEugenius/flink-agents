@@ -72,12 +72,14 @@ class Action(BaseModel):
         config = self["config"]
         if config is not None and _CONFIG_TYPE in config:
             self["config"].pop(_CONFIG_TYPE)
+            print(f"config: {config}")
             for name, value in config.items():
                 try:
                     module = importlib.import_module(value[0])
                     clazz = getattr(module, value[1])
                     self["config"][name] = clazz.model_validate(value[2])
-                except Exception:  # noqa : PERF203
+                except Exception as e:  # noqa : PERF203
+                    print(f"Error occurred while deserializing config: {type(e).__name__}: {e}")
                     self["config"][name] = value
         return self
 

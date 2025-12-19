@@ -96,9 +96,33 @@ java_tests() {
     echo "Executing Java test suite..."
     pushd "${ROOT}"
     if $run_e2e; then
-        mvn -T16 --batch-mode --no-transfer-progress test -pl 'e2e-test/flink-agents-end-to-end-tests-integration'
+        # 先安装 dist 包到本地仓库，确保 E2E 测试能找到最新的 dist
+        echo "Installing dist packages to local repository..."
+        mvn --batch-mode --no-transfer-progress install -pl dist/flink-2.2,dist/flink-1.20 -DskipTests
+        install_code=$?
+        if [ $install_code -ne 0 ]; then
+            echo "Failed to install dist packages" >&2
+            return 1
+        fi
+
+        # 运行 E2E 测试，支持多版本 Flink
+        echo "Running E2E tests for Flink 2.2..."
+        mvn --batch-mode --no-transfer-progress test -pl 'e2e-test/flink-agents-end-to-end-tests-integration' -Pflink-2.2
+        testcode_2_2=$?
+
+        echo "Running E2E tests for Flink 1.20..."
+        mvn --batch-mode --no-transfer-progress test -pl 'e2e-test/flink-agents-end-to-end-tests-integration' -Pflink-1.20
+        testcode_1_20=$?
+
+        # 如果任一版本测试失败，则返回失败
+        if [ $testcode_2_2 -ne 0 ] || [ $testcode_1_20 -ne 0 ]; then
+            echo "E2E tests failed for one or more Flink versions" >&2
+            return 1
+        fi
+        testcode=0
     else
-        mvn -T16 --batch-mode --no-transfer-progress test -pl '!e2e-test/flink-agents-end-to-end-tests-integration'
+        mvn -T16 --batch-mode --no-transfer-progress test -pl '!e2e-test/flink-agents-end-to-end-tests-integration,!compatibility/flink-1.20'
+        mvn test -pl compatibility/flink-1.20
     fi
     testcode=$?
     case $testcode in

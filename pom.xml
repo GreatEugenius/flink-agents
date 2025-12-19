@@ -52,6 +52,9 @@ under the License.
         <assertj.version>3.23.1</assertj.version>
         <mockito.version>5.8.0</mockito.version>
 
+        <flink.1.20.version>1.20.3</flink.1.20.version>
+        <flink.2.2.version>2.2.0</flink.2.2.version>
+
         <gpg.useagent>true</gpg.useagent>
         <arguments />
     </properties>
@@ -64,6 +67,8 @@ under the License.
         <module>e2e-test</module>
         <module>integrations</module>
         <module>dist</module>
+        <module>compatibility</module>
+        <module>compatibility/flink-1.20</module>
     </modules>
 
     <dependencies>

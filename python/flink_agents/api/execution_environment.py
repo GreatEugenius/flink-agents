@@ -31,6 +31,7 @@ from flink_agents.api.resource import (
     ResourceType,
     SerializableResource,
 )
+from flink_agents.api.version_compatibility import flink_version_manager
 
 
 class AgentBuilder(ABC):
@@ -127,11 +128,17 @@ class AgentsExecutionEnvironment(ABC):
                 "flink_agents.runtime.local_execution_environment"
             ).create_instance(env=env, t_env=t_env, **kwargs)
         else:
-            for path in files("flink_agents.lib").iterdir():
-                env.add_jars(f"file://{path}")
-            return importlib.import_module(
-                "flink_agents.runtime.remote_execution_environment"
-            ).create_instance(env=env, t_env=t_env, **kwargs)
+            major_version = flink_version_manager.major_version
+            if major_version:
+                print(f"Apache Flink {major_version} is installed.")
+                for path in files("flink_agents.lib").iterdir():
+                    env.add_jars(f"file://{path}")
+                return importlib.import_module(
+                    "flink_agents.runtime.remote_execution_environment"
+                ).create_instance(env=env, t_env=t_env, **kwargs)
+            else:
+                err_msg = "Apache Flink is not installed."
+                raise ValueError(err_msg)
 
     @abstractmethod
     def get_config(self, path: str | None = None) -> Configuration:

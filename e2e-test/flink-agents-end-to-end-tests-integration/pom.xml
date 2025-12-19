@@ -28,16 +28,17 @@ under the License.
     <artifactId>flink-agents-end-to-end-tests-integration</artifactId>
     <name>Flink Agents : E2E Tests: Integration</name>
 
+    <properties>
+        <!-- 默认使用 Flink 2.2 -->
+        <flink.version>${flink.2.2.version}</flink.version>
+        <flink.agents.dist.artifactId>flink-agents-dist-flink-2.2</flink.agents.dist.artifactId>
+    </properties>
+
     <dependencies>
         <dependency>
             <groupId>org.apache.flink</groupId>
-            <artifactId>flink-agents-api</artifactId>
-            <version>${project.version}</version>
-        </dependency>
-        <dependency>
-            <groupId>org.apache.flink</groupId>
-            <artifactId>flink-agents-runtime</artifactId>
-            <version>${project.version}</version>
+            <artifactId>${flink.agents.dist.artifactId}</artifactId>
+            <version>0.2-SNAPSHOT</version>
         </dependency>
         <dependency>
             <groupId>org.apache.flink</groupId>
@@ -80,5 +81,28 @@ under the License.
             <version>${project.version}</version>
         </dependency>
     </dependencies>
+
+    <profiles>
+        <!-- Flink 2.2 Profile（默认） -->
+        <profile>
+            <id>flink-2.2</id>
+            <activation>
+                <activeByDefault>true</activeByDefault>
+            </activation>
+            <properties>
+                <flink.version>${flink.2.2.version}</flink.version>
+                <flink.agents.dist.artifactId>flink-agents-dist-flink-2.2</flink.agents.dist.artifactId>
+            </properties>
+        </profile>
+
+        <!-- Flink 1.20 Profile -->
+        <profile>
+            <id>flink-1.20</id>
+            <properties>
+                <flink.version>${flink.1.20.version}</flink.version>
+                <flink.agents.dist.artifactId>flink-agents-dist-flink-1.20</flink.agents.dist.artifactId>
+            </properties>
+        </profile>
+    </profiles>
 
 </project>

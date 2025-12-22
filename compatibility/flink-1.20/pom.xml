@@ -42,113 +42,16 @@ under the License.
             <groupId>org.apache.flink</groupId>
             <artifactId>flink-agents-api</artifactId>
             <version>${project.version}</version>
-            <exclusions>
-                <!-- 只排除 Flink 框架依赖，不排除 flink-agents-* 模块 -->
-                <exclusion>
-                    <groupId>org.apache.flink</groupId>
-                    <artifactId>flink-streaming-java</artifactId>
-                </exclusion>
-                <exclusion>
-                    <groupId>org.apache.flink</groupId>
-                    <artifactId>flink-runtime</artifactId>
-                </exclusion>
-                <exclusion>
-                    <groupId>org.apache.flink</groupId>
-                    <artifactId>flink-clients</artifactId>
-                </exclusion>
-                <exclusion>
-                    <groupId>org.apache.flink</groupId>
-                    <artifactId>flink-table-api-java</artifactId>
-                </exclusion>
-                <exclusion>
-                    <groupId>org.apache.flink</groupId>
-                    <artifactId>flink-table-api-java-bridge</artifactId>
-                </exclusion>
-                <exclusion>
-                    <groupId>org.apache.flink</groupId>
-                    <artifactId>flink-metrics-core</artifactId>
-                </exclusion>
-                <exclusion>
-                    <groupId>org.apache.flink</groupId>
-                    <artifactId>flink-shaded-jackson</artifactId>
-                </exclusion>
-            </exclusions>
         </dependency>
         <dependency>
             <groupId>org.apache.flink</groupId>
             <artifactId>flink-agents-plan</artifactId>
             <version>${project.version}</version>
-            <exclusions>
-                <!-- 只排除 Flink 框架依赖，不排除 flink-agents-* 模块 -->
-                <exclusion>
-                    <groupId>org.apache.flink</groupId>
-                    <artifactId>flink-streaming-java</artifactId>
-                </exclusion>
-                <exclusion>
-                    <groupId>org.apache.flink</groupId>
-                    <artifactId>flink-runtime</artifactId>
-                </exclusion>
-                <exclusion>
-                    <groupId>org.apache.flink</groupId>
-                    <artifactId>flink-clients</artifactId>
-                </exclusion>
-                <exclusion>
-                    <groupId>org.apache.flink</groupId>
-                    <artifactId>flink-table-api-java</artifactId>
-                </exclusion>
-                <exclusion>
-                    <groupId>org.apache.flink</groupId>
-                    <artifactId>flink-table-api-java-bridge</artifactId>
-                </exclusion>
-                <exclusion>
-                    <groupId>org.apache.flink</groupId>
-                    <artifactId>flink-metrics-core</artifactId>
-                </exclusion>
-                <exclusion>
-                    <groupId>org.apache.flink</groupId>
-                    <artifactId>flink-shaded-jackson</artifactId>
-                </exclusion>
-            </exclusions>
         </dependency>
         <dependency>
             <groupId>org.apache.flink</groupId>
             <artifactId>flink-agents-runtime</artifactId>
             <version>${project.version}</version>
-            <exclusions>
-                <!-- 只排除 Flink 框架依赖，不排除 flink-agents-* 模块 -->
-                <exclusion>
-                    <groupId>org.apache.flink</groupId>
-                    <artifactId>flink-streaming-java</artifactId>
-                </exclusion>
-                <exclusion>
-                    <groupId>org.apache.flink</groupId>
-                    <artifactId>flink-runtime</artifactId>
-                </exclusion>
-                <exclusion>
-                    <groupId>org.apache.flink</groupId>
-                    <artifactId>flink-clients</artifactId>
-                </exclusion>
-                <exclusion>
-                    <groupId>org.apache.flink</groupId>
-                    <artifactId>flink-table-api-java</artifactId>
-                </exclusion>
-                <exclusion>
-                    <groupId>org.apache.flink</groupId>
-                    <artifactId>flink-table-api-java-bridge</artifactId>
-                </exclusion>
-                <exclusion>
-                    <groupId>org.apache.flink</groupId>
-                    <artifactId>flink-metrics-core</artifactId>
-                </exclusion>
-                <exclusion>
-                    <groupId>org.apache.flink</groupId>
-                    <artifactId>flink-shaded-jackson</artifactId>
-                </exclusion>
-                <exclusion>
-                    <groupId>org.apache.flink</groupId>
-                    <artifactId>flink-python</artifactId>
-                </exclusion>
-            </exclusions>
         </dependency>
 
         <!-- 依赖三个主模块的 test-jar，排除 Flink 框架依赖 -->
@@ -158,37 +61,6 @@ under the License.
             <version>${project.version}</version>
             <type>test-jar</type>
             <scope>test</scope>
-            <exclusions>
-                <!-- 只排除 Flink 框架依赖，不排除 flink-agents-* 模块 -->
-                <exclusion>
-                    <groupId>org.apache.flink</groupId>
-                    <artifactId>flink-streaming-java</artifactId>
-                </exclusion>
-                <exclusion>
-                    <groupId>org.apache.flink</groupId>
-                    <artifactId>flink-runtime</artifactId>
-                </exclusion>
-                <exclusion>
-                    <groupId>org.apache.flink</groupId>
-                    <artifactId>flink-clients</artifactId>
-                </exclusion>
-                <exclusion>
-                    <groupId>org.apache.flink</groupId>
-                    <artifactId>flink-table-api-java</artifactId>
-                </exclusion>
-                <exclusion>
-                    <groupId>org.apache.flink</groupId>
-                    <artifactId>flink-table-api-java-bridge</artifactId>
-                </exclusion>
-                <exclusion>
-                    <groupId>org.apache.flink</groupId>
-                    <artifactId>flink-metrics-core</artifactId>
-                </exclusion>
-                <exclusion>
-                    <groupId>org.apache.flink</groupId>
-                    <artifactId>flink-shaded-jackson</artifactId>
-                </exclusion>
-            </exclusions>
         </dependency>
         <dependency>
             <groupId>org.apache.flink</groupId>
@@ -196,37 +68,6 @@ under the License.
             <version>${project.version}</version>
             <type>test-jar</type>
             <scope>test</scope>
-            <exclusions>
-                <!-- 只排除 Flink 框架依赖，不排除 flink-agents-* 模块 -->
-                <exclusion>
-                    <groupId>org.apache.flink</groupId>
-                    <artifactId>flink-streaming-java</artifactId>
-                </exclusion>
-                <exclusion>
-                    <groupId>org.apache.flink</groupId>
-                    <artifactId>flink-runtime</artifactId>
-                </exclusion>
-                <exclusion>
-                    <groupId>org.apache.flink</groupId>
-                    <artifactId>flink-clients</artifactId>
-                </exclusion>
-                <exclusion>
-                    <groupId>org.apache.flink</groupId>
-                    <artifactId>flink-table-api-java</artifactId>
-                </exclusion>
-                <exclusion>
-                    <groupId>org.apache.flink</groupId>
-                    <artifactId>flink-table-api-java-bridge</artifactId>
-                </exclusion>
-                <exclusion>
-                    <groupId>org.apache.flink</groupId>
-                    <artifactId>flink-metrics-core</artifactId>
-                </exclusion>
-                <exclusion>
-                    <groupId>org.apache.flink</groupId>
-                    <artifactId>flink-shaded-jackson</artifactId>
-                </exclusion>
-            </exclusions>
         </dependency>
         <dependency>
             <groupId>org.apache.flink</groupId>
@@ -234,41 +75,6 @@ under the License.
             <version>${project.version}</version>
             <type>test-jar</type>
             <scope>test</scope>
-            <exclusions>
-                <!-- 只排除 Flink 框架依赖，不排除 flink-agents-* 模块 -->
-                <exclusion>
-                    <groupId>org.apache.flink</groupId>
-                    <artifactId>flink-streaming-java</artifactId>
-                </exclusion>
-                <exclusion>
-                    <groupId>org.apache.flink</groupId>
-                    <artifactId>flink-runtime</artifactId>
-                </exclusion>
-                <exclusion>
-                    <groupId>org.apache.flink</groupId>
-                    <artifactId>flink-clients</artifactId>
-                </exclusion>
-                <exclusion>
-                    <groupId>org.apache.flink</groupId>
-                    <artifactId>flink-table-api-java</artifactId>
-                </exclusion>
-                <exclusion>
-                    <groupId>org.apache.flink</groupId>
-                    <artifactId>flink-table-api-java-bridge</artifactId>
-                </exclusion>
-                <exclusion>
-                    <groupId>org.apache.flink</groupId>
-                    <artifactId>flink-metrics-core</artifactId>
-                </exclusion>
-                <exclusion>
-                    <groupId>org.apache.flink</groupId>
-                    <artifactId>flink-shaded-jackson</artifactId>
-                </exclusion>
-                <exclusion>
-                    <groupId>org.apache.flink</groupId>
-                    <artifactId>flink-python</artifactId>
-                </exclusion>
-            </exclusions>
         </dependency>
 
         <!-- Flink 依赖 -->
@@ -390,14 +196,7 @@ under the License.
                         <configuration>
                             <shadeTestJar>false</shadeTestJar>
                             <artifactSet>
-                                <includes>
-                                    <!-- 包含主模块 -->
-                                    <include>org.apache.flink:flink-agents-api</include>
-                                    <include>org.apache.flink:flink-agents-plan</include>
-                                    <include>org.apache.flink:flink-agents-runtime</include>
-                                    <!-- 包含 integrations -->
-                                    <include>org.apache.flink:flink-agents-integrations-chat-models-ollama</include>
-                                </includes>
+                                <!-- 默认包含所有 compile scope 的依赖 -->
                             </artifactSet>
                             <filters>
                                 <!-- 通用过滤器：排除签名文件 -->

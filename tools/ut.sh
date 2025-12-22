@@ -121,10 +121,32 @@ java_tests() {
         fi
         testcode=0
     else
+        # 先安装所有模块（包括 test-jar）到本地仓库
+        echo "Installing all modules (including test-jars) to local repository..."
+        mvn --batch-mode --no-transfer-progress install -DskipTests
+        install_code=$?
+        if [ $install_code -ne 0 ]; then
+            echo "Failed to install modules to local repository" >&2
+            return 1
+        fi
+
+        # 运行除 E2E 和 compatibility 外的所有模块测试
+        echo "Running tests for main modules..."
         mvn -T16 --batch-mode --no-transfer-progress test -pl '!e2e-test/flink-agents-end-to-end-tests-integration,!compatibility/flink-1.20'
-        mvn test -pl compatibility/flink-1.20
+        testcode_main=$?
+
+        # 运行 compatibility/flink-1.20 的测试
+        echo "Running tests for compatibility/flink-1.20..."
+        mvn --batch-mode --no-transfer-progress test -pl compatibility/flink-1.20
+        testcode_compat=$?
+
+        # 如果任一测试失败，则返回失败
+        if [ $testcode_main -ne 0 ] || [ $testcode_compat -ne 0 ]; then
+            testcode=1
+        else
+            testcode=0
+        fi
     fi
-    testcode=$?
     case $testcode in
         0)  # All tests passed
             if $verbose; then

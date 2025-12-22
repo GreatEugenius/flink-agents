@@ -131,12 +131,12 @@ java_tests() {
         fi
 
         # 运行除 E2E 和 compatibility 外的所有模块测试
-        echo "Running tests for main modules..."
+        echo "Running tests for Flink 2.2..."
         mvn -T16 --batch-mode --no-transfer-progress test -pl '!e2e-test/flink-agents-end-to-end-tests-integration,!compatibility/flink-1.20'
         testcode_main=$?
 
         # 运行 compatibility/flink-1.20 的测试
-        echo "Running tests for compatibility/flink-1.20..."
+        echo "Running tests for Flink 1.20..."
         mvn --batch-mode --no-transfer-progress test -pl compatibility/flink-1.20
         testcode_compat=$?
 

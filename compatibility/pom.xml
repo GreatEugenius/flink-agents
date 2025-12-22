@@ -10,6 +10,11 @@
     </parent>
 
     <artifactId>compatibility</artifactId>
+    <packaging>pom</packaging>
+
+    <modules>
+        <module>flink-1.20</module>
+    </modules>
 
     <properties>
         <maven.compiler.source>11</maven.compiler.source>

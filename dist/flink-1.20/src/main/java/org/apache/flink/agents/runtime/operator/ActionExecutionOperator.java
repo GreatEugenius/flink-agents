@@ -93,6 +93,7 @@ import java.util.Map;
 import java.util.Optional;
 
 import static org.apache.flink.agents.api.configuration.AgentConfigOptions.ACTION_STATE_STORE_BACKEND;
+import static org.apache.flink.agents.api.configuration.AgentConfigOptions.JOB_IDENTIFIER;
 import static org.apache.flink.agents.runtime.actionstate.ActionStateStore.BackendType.KAFKA;
 import static org.apache.flink.agents.runtime.utils.StateUtil.*;
 import static org.apache.flink.util.Preconditions.checkState;
@@ -135,6 +136,9 @@ public class ActionExecutionOperator<IN, OUT> extends AbstractStreamOperator<OUT
     // PythonActionExecutor for Python actions
     private transient PythonActionExecutor pythonActionExecutor;
 
+    // RunnerContext for Python actions
+    private transient PythonRunnerContextImpl pythonRunnerContext;
+
     // PythonResourceAdapter for Python resources in Java actions
     private transient PythonResourceAdapterImpl pythonResourceAdapter;
 
@@ -145,6 +149,9 @@ public class ActionExecutionOperator<IN, OUT> extends AbstractStreamOperator<OUT
     private transient SegmentedQueue keySegmentQueue;
 
     private final transient MailboxExecutor mailboxExecutor;
+
+    // RunnerContext for Java Actions
+    private transient RunnerContextImpl runnerContext;
 
     // We need to check whether the current thread is the mailbox thread using the mailbox
     // processor.
@@ -176,7 +183,15 @@ public class ActionExecutionOperator<IN, OUT> extends AbstractStreamOperator<OUT
 
     // This in memory map keep track of the runner context for the async action task that having
     // been finished
-    private final transient Map<ActionTask, RunnerContextImpl> actionTaskRunnerContexts;
+    private final transient Map<ActionTask, RunnerContextImpl.MemoryContext>
+            actionTaskMemoryContexts;
+
+    // Each job can only have one identifier and this identifier must be consistent across restarts.
+    // We cannot use job id as the identifier here because user may change job id by
+    // creating a savepoint, stop the job and then resume from savepoint.
+    // We use this identifier to control the visibility for long-term memory.
+    // Inspired by Apache Paimon.
+    private transient String jobIdentifier;
 
     public ActionExecutionOperator(
             AgentPlan agentPlan,
@@ -192,7 +207,7 @@ public class ActionExecutionOperator<IN, OUT> extends AbstractStreamOperator<OUT
         this.eventListeners = new ArrayList<>();
         this.actionStateStore = actionStateStore;
         this.checkpointIdToSeqNums = new HashMap<>();
-        this.actionTaskRunnerContexts = new HashMap<>();
+        this.actionTaskMemoryContexts = new HashMap<>();
         this.chainingStrategy = ChainingStrategy.ALWAYS;
     }
 
@@ -445,12 +460,14 @@ public class ActionExecutionOperator<IN, OUT> extends AbstractStreamOperator<OUT
         } else {
             maybeInitActionState(key, sequenceNumber, actionTask.action, actionTask.event);
             ActionTask.ActionTaskResult actionTaskResult =
-                    actionTask.invoke(getRuntimeContext().getUserCodeClassLoader());
+                    actionTask.invoke(
+                            getRuntimeContext().getUserCodeClassLoader(),
+                            this.pythonActionExecutor);
 
             // We remove the RunnerContext of the action task from the map after it is finished. The
             // RunnerContext will be added later if the action task has a generated action task,
             // meaning it is not finished.
-            actionTaskRunnerContexts.remove(actionTask);
+            actionTaskMemoryContexts.remove(actionTask);
             maybePersistTaskResult(
                     key,
                     sequenceNumber,
@@ -485,7 +502,8 @@ public class ActionExecutionOperator<IN, OUT> extends AbstractStreamOperator<OUT
 
             // If the action task is not finished, we keep the runner context in the memory for the
             // next generated ActionTask to be invoked.
-            actionTaskRunnerContexts.put(generatedActionTask, actionTask.getRunnerContext());
+            actionTaskMemoryContexts.put(
+                    generatedActionTask, actionTask.getRunnerContext().getMemoryContext());
 
             actionTasksKState.add(generatedActionTask);
         }
@@ -554,6 +572,9 @@ public class ActionExecutionOperator<IN, OUT> extends AbstractStreamOperator<OUT
             pythonEnvironmentManager.open();
             EmbeddedPythonEnvironment env = pythonEnvironmentManager.createEnvironment();
             pythonInterpreter = env.getInterpreter();
+            pythonRunnerContext =
+                    new PythonRunnerContextImpl(
+                            this.metricGroup, this::checkMailboxThread, this.agentPlan);
             if (containPythonAction) {
                 initPythonActionExecutor();
             } else {
@@ -569,7 +590,9 @@ public class ActionExecutionOperator<IN, OUT> extends AbstractStreamOperator<OUT
                 new PythonActionExecutor(
                         pythonInterpreter,
                         new ObjectMapper().writeValueAsString(agentPlan),
-                        javaResourceAdapter);
+                        javaResourceAdapter,
+                        pythonRunnerContext,
+                        jobIdentifier);
         pythonActionExecutor.open();
     }
 
@@ -644,6 +667,16 @@ public class ActionExecutionOperator<IN, OUT> extends AbstractStreamOperator<OUT
                 recoveryMarkers.forEach(markers::add);
             }
             actionStateStore.rebuildState(markers);
+        }
+
+        // Get job identifier from user configuration.
+        // If not configured, get from state.
+        jobIdentifier = agentPlan.getConfig().get(JOB_IDENTIFIER);
+        if (jobIdentifier == null) {
+            String initialJobIdentifier = getRuntimeContext().getJobInfo().getJobId().toString();
+            jobIdentifier =
+                    StateUtils.getSingleValueFromState(
+                            context, "identifier_state", String.class, initialJobIdentifier);
         }
     }
 
@@ -743,31 +776,28 @@ public class ActionExecutionOperator<IN, OUT> extends AbstractStreamOperator<OUT
         }
 
         RunnerContextImpl runnerContext;
-        if (actionTaskRunnerContexts.containsKey(actionTask)) {
-            runnerContext = actionTaskRunnerContexts.get(actionTask);
-        } else if (actionTask.action.getExec() instanceof JavaFunction) {
-            runnerContext =
-                    new RunnerContextImpl(
-                            new CachedMemoryStore(sensoryMemState),
-                            new CachedMemoryStore(shortTermMemState),
-                            metricGroup,
-                            this::checkMailboxThread,
-                            agentPlan);
+        if (actionTask.action.getExec() instanceof JavaFunction) {
+            runnerContext = createOrGetRunnerContext(true);
         } else if (actionTask.action.getExec() instanceof PythonFunction) {
-            runnerContext =
-                    new PythonRunnerContextImpl(
-                            new CachedMemoryStore(sensoryMemState),
-                            new CachedMemoryStore(shortTermMemState),
-                            metricGroup,
-                            this::checkMailboxThread,
-                            agentPlan,
-                            pythonActionExecutor);
+            runnerContext = createOrGetRunnerContext(false);
         } else {
             throw new IllegalStateException(
                     "Unsupported action type: " + actionTask.action.getExec().getClass());
         }
 
-        runnerContext.setActionName(actionTask.action.getName());
+        RunnerContextImpl.MemoryContext memoryContext;
+        if (actionTaskMemoryContexts.containsKey(actionTask)) {
+            // action task for async execution action, should retrieve intermediate results from
+            // map.
+            memoryContext = actionTaskMemoryContexts.get(actionTask);
+        } else {
+            memoryContext =
+                    new RunnerContextImpl.MemoryContext(
+                            new CachedMemoryStore(sensoryMemState),
+                            new CachedMemoryStore(shortTermMemState));
+        }
+
+        runnerContext.switchActionContext(actionTask.action.getName(), memoryContext);
         actionTask.setRunnerContext(runnerContext);
     }
 
@@ -871,6 +901,24 @@ public class ActionExecutionOperator<IN, OUT> extends AbstractStreamOperator<OUT
         while (mark != null) {
             super.processWatermark(mark);
             mark = keySegmentQueue.popOldestWatermark();
+        }
+    }
+
+    private RunnerContextImpl createOrGetRunnerContext(Boolean isJava) {
+        if (isJava) {
+            if (runnerContext == null) {
+                runnerContext =
+                        new RunnerContextImpl(
+                                this.metricGroup, this::checkMailboxThread, this.agentPlan);
+            }
+            return runnerContext;
+        } else {
+            if (pythonRunnerContext == null) {
+                pythonRunnerContext =
+                        new PythonRunnerContextImpl(
+                                this.metricGroup, this::checkMailboxThread, this.agentPlan);
+            }
+            return pythonRunnerContext;
         }
     }
 

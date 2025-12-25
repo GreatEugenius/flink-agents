@@ -21,18 +21,16 @@ import org.apache.flink.agents.plan.AgentPlan;
 import org.apache.flink.agents.runtime.actionstate.ActionStateStore;
 import org.apache.flink.api.common.operators.MailboxExecutor;
 import org.apache.flink.streaming.api.graph.StreamConfig;
+import org.apache.flink.streaming.api.operators.ChainingStrategy;
 import org.apache.flink.streaming.api.operators.Output;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
 import org.apache.flink.streaming.runtime.tasks.ProcessingTimeService;
 import org.apache.flink.streaming.runtime.tasks.StreamTask;
 
 /**
- * Default implementation of the action execution operator that extends {@link
- * BaseActionExecutionOperator}.
- *
- * <p>This class serves as the standard operator implementation in the runtime module.
- * Version-specific modules (e.g., dist/flink-1.20) may provide their own implementations with
- * customized behavior for specific Flink versions.
+ * Flink 1.20 specific implementation of ActionExecutionOperator. This class extends
+ * BaseActionExecutionOperator and sets the chaining strategy to ALWAYS for Flink 1.20
+ * compatibility.
  */
 public class ActionExecutionOperator<IN, OUT> extends BaseActionExecutionOperator<IN, OUT> {
 
@@ -45,10 +43,12 @@ public class ActionExecutionOperator<IN, OUT> extends BaseActionExecutionOperato
             MailboxExecutor mailboxExecutor,
             ActionStateStore actionStateStore) {
         super(agentPlan, inputIsJava, processingTimeService, mailboxExecutor, actionStateStore);
+        // Set chaining strategy for Flink 1.20 compatibility
+        this.chainingStrategy = ChainingStrategy.ALWAYS;
     }
 
     @Override
-    protected void setup(
+    public void setup(
             StreamTask<?, ?> containingTask,
             StreamConfig config,
             Output<StreamRecord<OUT>> output) {

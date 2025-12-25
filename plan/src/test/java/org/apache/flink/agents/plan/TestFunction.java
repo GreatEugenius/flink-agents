@@ -17,10 +17,10 @@
  */
 package org.apache.flink.agents.plan;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.flink.agents.api.Event;
 import org.apache.flink.agents.api.InputEvent;
 import org.apache.flink.agents.api.OutputEvent;
-import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
@@ -121,6 +121,14 @@ public class TestFunction {
 
     @Test
     public void testFunctionSerializable() throws Exception {
+        // Print Jackson version information
+        System.out.println("=== Jackson Version Info ===");
+        System.out.println(
+                "ObjectMapper class location: "
+                        + ObjectMapper.class.getProtectionDomain().getCodeSource().getLocation());
+        System.out.println(
+                "Jackson version: " + com.fasterxml.jackson.databind.cfg.PackageVersion.VERSION);
+
         Function func =
                 new JavaFunction(
                         "org.apache.flink.agents.plan.TestFunction",

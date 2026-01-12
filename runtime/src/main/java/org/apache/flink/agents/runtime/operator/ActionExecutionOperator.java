@@ -142,6 +142,9 @@ public class ActionExecutionOperator<IN, OUT> extends AbstractStreamOperator<OUT
     // PythonResourceAdapter for Python resources in Java actions
     private transient PythonResourceAdapterImpl pythonResourceAdapter;
 
+    // PythonResourceAdapter for Java resources in Python actions or Python resources
+    private transient JavaResourceAdapter javaResourceAdapter;
+
     private transient FlinkAgentsMetricGroupImpl metricGroup;
 
     private transient BuiltInMetrics builtInMetrics;
@@ -576,17 +579,25 @@ public class ActionExecutionOperator<IN, OUT> extends AbstractStreamOperator<OUT
             pythonRunnerContext =
                     new PythonRunnerContextImpl(
                             this.metricGroup, this::checkMailboxThread, this.agentPlan);
+
+            javaResourceAdapter =
+                    new JavaResourceAdapter(
+                            (String anotherName, ResourceType anotherType) -> {
+                                try {
+                                    return agentPlan.getResource(anotherName, anotherType);
+                                } catch (Exception e) {
+                                    throw new RuntimeException(e);
+                                }
+                            },
+                            pythonInterpreter);
+            initPythonResourceAdapter();
             if (containPythonAction) {
                 initPythonActionExecutor();
-            } else {
-                initPythonResourceAdapter();
             }
         }
     }
 
     private void initPythonActionExecutor() throws Exception {
-        JavaResourceAdapter javaResourceAdapter =
-                new JavaResourceAdapter(agentPlan, pythonInterpreter);
         pythonActionExecutor =
                 new PythonActionExecutor(
                         pythonInterpreter,
@@ -607,7 +618,8 @@ public class ActionExecutionOperator<IN, OUT> extends AbstractStreamOperator<OUT
                                 throw new RuntimeException(e);
                             }
                         },
-                        pythonInterpreter);
+                        pythonInterpreter,
+                        javaResourceAdapter);
         pythonResourceAdapter.open();
         agentPlan.setPythonResourceAdapter(pythonResourceAdapter);
     }

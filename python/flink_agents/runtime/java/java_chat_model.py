@@ -36,7 +36,20 @@ class JavaChatModelConnectionImpl(JavaChatModelConnection):
     """
 
 
-    j_resource: Any
+    _j_resource: Any
+    _j_resource_adapter: Any
+
+    def __init__(self, j_resource: Any, j_resource_adapter: Any, **kwargs: Any) -> None:
+        """Creates a new JavaChatModelSetup.
+
+        Args:
+            j_resource: The Java resource object
+            j_resource_adapter: The Java resource adapter for method invocation
+            **kwargs: Additional keyword arguments
+        """
+        super().__init__(**kwargs)
+        self._j_resource=j_resource
+        self._j_resource_adapter=j_resource_adapter
 
     @override
     def chat(
@@ -51,12 +64,21 @@ class JavaChatModelConnectionImpl(JavaChatModelConnection):
         Chat operations should be performed on the Java side using the underlying Java
         chat model object.
         """
-        err_msg = (
-            "Chat method of JavaChatModelConnection cannot be called directly from Python runtime. "
-            "This connection serves as a Java resource wrapper only. "
-            "Chat operations should be performed on the Java side using the underlying Java chat model object."
+        java_messages = [
+            self._j_resource_adapter.fromPythonChatMessage(message)
+            for message in messages
+        ]
+        java_tools = [
+            self._j_resource_adapter.fromToolName(tool.name) for tool in tools
+        ]
+        j_response_message = self._j_resource.chat(java_messages, java_tools, kwargs)
+
+        # Convert Java response back to Python format
+        from flink_agents.runtime.python_java_utils import (
+            from_java_chat_message,
         )
-        raise NotImplementedError(err_msg)
+
+        return from_java_chat_message(j_response_message)
 
 
 class JavaChatModelSetupImpl(JavaChatModelSetup):

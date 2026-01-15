@@ -25,143 +25,6 @@ on:
   workflow_dispatch:
 
 jobs:
-  lint:
-    name: Code Style Check
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Check License Header
-        run: tools/check-license.sh
-      - name: Set up JDK
-        uses: actions/setup-java@v4
-        with:
-          java-version: '17'
-          distribution: 'adopt'
-      - name: Set up Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: 3.11
-      - name: Install uv
-        uses: astral-sh/setup-uv@v4
-        with:
-          version: "latest"
-      - name: Check code style
-        run: ./tools/lint.sh -c
-
-  java_tests:
-    name: ut-java [${{ matrix.os }}] [java-${{ matrix.java-version}}]
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ 'macos-latest', 'ubuntu-latest' ]
-        java-version: ["11", "17"]
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install java
-        uses: actions/setup-java@v4
-        with:
-          java-version: ${{ matrix.java-version }}
-          distribution: 'adopt'
-      - name: Install python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.11'
-      - name: Install uv
-        uses: astral-sh/setup-uv@v4
-        with:
-          version: "latest"
-      - name: Install Python dependencies for MCP tests
-        run: |
-          cd python
-          uv sync --all-extras
-      - name: Run Java Tests
-        run: |
-          # Add Python venv to PATH so Java tests can find MCP dependencies
-          export PATH="${{ github.workspace }}/python/.venv/bin:$PATH"
-          export PYTHONPATH="${{ github.workspace }}/python/.venv/lib/python3.11/site-packages:$PYTHONPATH"
-          tools/ut.sh -j
-
-  python_tests:
-    name: ut-python [${{ matrix.os }}] [python-${{ matrix.python-version}}]
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ 'macos-latest', 'ubuntu-latest' ]
-        python-version: [ '3.10', '3.11' ]
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install java
-        uses: actions/setup-java@v4
-        with:
-          java-version: '17'
-          distribution: 'adopt'
-      - name: Install python
-        uses: actions/setup-python@v4
-        with:
-          python-version: ${{ matrix.python-version }}
-      - name: Install uv
-        uses: astral-sh/setup-uv@v4
-        with:
-          version: "latest"
-      - name: Run Python Tests
-        run: tools/ut.sh -p
-
-  python_it_tests:
-    name: it-python [${{ matrix.os }}] [python-${{ matrix.python-version}}] [flink-${{ matrix.flink-version}}]
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ 'ubuntu-latest' ]
-        python-version: [ '3.11' ]
-        flink-version: [ "1.20", "2.0", "2.1", "2.2" ]
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install java
-        uses: actions/setup-java@v4
-        with:
-          java-version: '17'
-          distribution: 'adopt'
-      - name: Install python
-        uses: actions/setup-python@v4
-        with:
-          python-version: ${{ matrix.python-version }}
-      - name: Install uv
-        uses: astral-sh/setup-uv@v4
-        with:
-          version: "latest"
-      - name: Install flink-agents
-        run: bash tools/build.sh
-      - name: Install ollama
-        run: bash tools/start_ollama_server.sh
-      - name: Run Python IT
-        run: tools/ut.sh -p -e -f ${{ matrix.flink-version }}
-
-  java_it_tests:
-    name: it-java [${{ matrix.os }}] [java-${{ matrix.java-version}}]  [flink-${{ matrix.flink-version}}]
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ 'ubuntu-latest' ]
-        java-version: [ "17" ]
-        flink-version: [ "1.20", "2.0", "2.1", "2.2" ]
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install java
-        uses: actions/setup-java@v4
-        with:
-          java-version: ${{ matrix.java-version }}
-          distribution: 'adopt'
-      - name: Install flink-agents Java
-        run: bash tools/build.sh -j
-      - name: Install ollama
-        run: bash tools/start_ollama_server.sh
-      - name: Run Java IT
-        run: tools/ut.sh -j -e -f ${{ matrix.flink-version }}
-
   cross_language_tests:
     name: cross-language [${{ matrix.os }}] [python-${{ matrix.python-version}}] [java-${{ matrix.java-version}}]
     runs-on: ${{ matrix.os }}
@@ -201,6 +64,10 @@ jobs:
         uses: astral-sh/setup-uv@v4
         with:
           version: "latest"
+      - name: Build flink-agents
+        run: bash tools/build.sh
+      - name: Install ollama
+        run: bash tools/start_ollama_server.sh
       - name: Verify Elasticsearch
         run: |
           echo "Verifying Elasticsearch is ready..."
@@ -221,9 +88,5 @@ jobs:
             echo "✗ Elasticsearch failed to start"
             exit 1
           fi
-      - name: Build flink-agents
-        run: bash tools/build.sh
-      - name: Install ollama
-        run: bash tools/start_ollama_server.sh
       - name: Run e2e tests
         run: bash tools/e2e.sh

@@ -74,7 +74,7 @@ os.environ["PYTHONPATH"] = sysconfig.get_paths()["purelib"]
 
 chromadb_path = tempfile.mkdtemp()
 
-OLLAMA_CHAT_MODEL = "qwen3:8b"
+OLLAMA_CHAT_MODEL = "qwen3:1.7b"
 OLLAMA_EMBEDDING_MODEL = "nomic-embed-text"
 pull_model(OLLAMA_CHAT_MODEL)
 pull_model(OLLAMA_EMBEDDING_MODEL)

@@ -165,6 +165,21 @@ jobs:
   cross_language_tests:
     name: cross-language [${{ matrix.os }}] [python-${{ matrix.python-version}}] [java-${{ matrix.java-version}}]
     runs-on: ${{ matrix.os }}
+    services:
+      elasticsearch:
+        image: docker.elastic.co/elasticsearch/elasticsearch:8.19.0
+        env:
+          discovery.type: single-node
+          xpack.security.enabled: false
+          ES_JAVA_OPTS: "-Xms512m -Xmx512m"
+        ports:
+          - 9200:9200
+        options: >-
+          --health-cmd "curl -f http://localhost:9200/_cluster/health || exit 1"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+          --health-start-period 30s
     strategy:
       fail-fast: false
       matrix:
@@ -186,23 +201,6 @@ jobs:
         uses: astral-sh/setup-uv@v4
         with:
           version: "latest"
-      - name: Start Elasticsearch
-        run: |
-          docker run --name es01 -p 9200:9200 -d \
-            -m 1GB \
-            -e "discovery.type=single-node" \
-            -e "xpack.security.enabled=false" \
-            docker.elastic.co/elasticsearch/elasticsearch:8.19.0
-
-          echo "Waiting for Elasticsearch..."
-          for i in {1..30}; do
-            if curl -s http://localhost:9200/_cluster/health | grep -q "yellow\|green"; then
-              echo "Elasticsearch is ready!"
-              break
-            fi
-            echo "Waiting... ($i/30)"
-            sleep 2
-          done
       - name: Build flink-agents
         run: bash tools/build.sh
       - name: Install ollama

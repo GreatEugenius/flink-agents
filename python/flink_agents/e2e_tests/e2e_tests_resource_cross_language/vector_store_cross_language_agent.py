@@ -98,7 +98,7 @@ class VectorStoreCrossLanguageAgent(Agent):
             clazz=JavaCollectionManageableVectorStore,
             java_clazz="org.apache.flink.agents.integrations.vectorstores.elasticsearch.ElasticsearchVectorStore",
             embedding_model="embedding_model",
-            host=os.environ.get("ES_HOST", "localhost:9200"),
+            host="http://localhost:9200",
             index="my_documents",
             dims=768,
         )

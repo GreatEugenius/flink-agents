@@ -201,6 +201,26 @@ jobs:
         uses: astral-sh/setup-uv@v4
         with:
           version: "latest"
+      - name: Verify Elasticsearch
+        run: |
+          echo "Verifying Elasticsearch is ready..."
+          max_attempts=30
+          attempt=0
+          while [ $attempt -lt $max_attempts ]; do
+            if curl -s http://localhost:9200/_cluster/health | grep -q "yellow\|green"; then
+              echo "✓ Elasticsearch is ready!"
+              curl -s http://localhost:9200 | jq .
+              break
+            fi
+            attempt=$((attempt + 1))
+            echo "Waiting for Elasticsearch... ($attempt/$max_attempts)"
+            sleep 2
+          done
+          
+          if [ $attempt -eq $max_attempts ]; then
+            echo "✗ Elasticsearch failed to start"
+            exit 1
+          fi
       - name: Build flink-agents
         run: bash tools/build.sh
       - name: Install ollama

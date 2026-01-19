@@ -35,6 +35,9 @@ import org.apache.flink.agents.plan.actions.Action;
 import org.apache.flink.agents.plan.actions.ChatModelAction;
 import org.apache.flink.agents.plan.actions.ContextRetrievalAction;
 import org.apache.flink.agents.plan.actions.ToolCallAction;
+import org.apache.flink.agents.plan.resource.python.PythonMCPPrompt;
+import org.apache.flink.agents.plan.resource.python.PythonMCPServer;
+import org.apache.flink.agents.plan.resource.python.PythonMCPTool;
 import org.apache.flink.agents.plan.resourceprovider.JavaResourceProvider;
 import org.apache.flink.agents.plan.resourceprovider.JavaSerializableResourceProvider;
 import org.apache.flink.agents.plan.resourceprovider.PythonResourceProvider;
@@ -133,8 +136,40 @@ public class AgentPlan implements Serializable {
         this.config = config;
     }
 
-    public void setPythonResourceAdapter(PythonResourceAdapter adapter) {
+    public void setPythonResourceAdapter(PythonResourceAdapter adapter) throws Exception {
         this.pythonResourceAdapter = adapter;
+        Map<String, ResourceProvider> servers = resourceProviders.get(MCP_SERVER);
+        if (servers != null) {
+            for (ResourceProvider provider : servers.values()) {
+                if (provider instanceof PythonResourceProvider) {
+                    ((PythonResourceProvider) provider).setPythonResourceAdapter(adapter);
+                    PythonMCPServer server =
+                            (PythonMCPServer)
+                                    provider.provide(
+                                            (String anotherName, ResourceType anotherType) -> {
+                                                try {
+                                                    return this.getResource(
+                                                            anotherName, anotherType);
+                                                } catch (Exception e) {
+                                                    throw new RuntimeException(e);
+                                                }
+                                            });
+                    List<PythonMCPTool> pythonMCPTools = server.listTools();
+                    for (PythonMCPTool pythonMCPTool : pythonMCPTools) {
+                        resourceCache
+                                .computeIfAbsent(TOOL, k -> new ConcurrentHashMap<>())
+                                .put(pythonMCPTool.getName(), pythonMCPTool);
+                    }
+
+                    List<PythonMCPPrompt> pythonMCPPrompts = server.listPrompts();
+                    for (PythonMCPPrompt pythonMCPPrompt : pythonMCPPrompts) {
+                        resourceCache
+                                .computeIfAbsent(PROMPT, k -> new ConcurrentHashMap<>())
+                                .put(pythonMCPPrompt.getName(), pythonMCPPrompt);
+                    }
+                }
+            }
+        }
     }
 
     public Map<String, Action> getActions() {
@@ -447,6 +482,8 @@ public class AgentPlan implements Serializable {
                 extractResource(ResourceType.EMBEDDING_MODEL_CONNECTION, method);
             } else if (method.isAnnotationPresent(VectorStore.class)) {
                 extractResource(ResourceType.VECTOR_STORE, method);
+            } else if (method.isAnnotationPresent(MCPServerPython.class)) {
+                extractResource(ResourceType.MCP_SERVER, method);
             } else if (Modifier.isStatic(method.getModifiers())) {
                 // Check for MCPServer annotation using reflection to support Java 11 without MCP
                 try {

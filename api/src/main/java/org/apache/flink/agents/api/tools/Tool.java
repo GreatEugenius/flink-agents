@@ -29,10 +29,14 @@ import java.lang.reflect.Method;
  */
 public abstract class Tool extends SerializableResource {
 
-    protected final ToolMetadata metadata;
+    protected ToolMetadata metadata;
 
     protected Tool(ToolMetadata metadata) {
         this.metadata = java.util.Objects.requireNonNull(metadata, "metadata cannot be null");
+    }
+
+    public final void setMetadata(ToolMetadata metadata) {
+        this.metadata = metadata;
     }
 
     /** Get the metadata of this tool. */

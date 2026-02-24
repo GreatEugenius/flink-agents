@@ -18,13 +18,19 @@
 name: "Pull Request Labeler"
 
 on:
-  pull_request_target:
-    types:
-      - opened
+  workflow_run:
+    workflows: [PR-Trigger]
+    types: [requested]
+
+permissions:
+  checks: write
+  contents: read
+  pull-requests: write
+
 jobs:
   triage:
-    if: (github.repository == 'apache/flink-agents')
     permissions:
+      checks: write
       contents: read
       pull-requests: write
       issues: write

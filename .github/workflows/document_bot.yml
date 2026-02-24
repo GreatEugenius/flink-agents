@@ -20,10 +20,14 @@
 name: "Documentation Bot"
 
 on:
-  pull_request_target:
-    types:
-      - opened
-      - edited
+  workflow_run:
+    workflows: [PR-Trigger]
+    types: [requested]
+
+permissions:
+  checks: write
+  contents: read
+  pull-requests: write
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event.number }}
@@ -31,9 +35,9 @@ concurrency:
 
 jobs:
   label:
-    if: (github.repository == 'apache/flink-agents') && (github.event.pull_request.state == 'open')
+    if: (github.event.pull_request.state == 'open')
     permissions:
-      pull-requests: write 
+      pull-requests: write
     runs-on: ubuntu-24.04
     steps:
       - name: Labeling

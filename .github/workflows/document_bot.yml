@@ -40,9 +40,14 @@ jobs:
       pull-requests: write
     runs-on: ubuntu-24.04
     steps:
+      - name: Checkout PR
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
       - name: Labeling
         uses: apache/pulsar-test-infra/docbot@8ff059e49446fff5bb9baf2de4a12bc05c2d57ab
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.workflow_run.pull_requests[0].number }}
           LABEL_WATCH_LIST: 'doc-needed,doc-not-needed,doc-included'
           LABEL_MISSING: 'doc-label-missing'

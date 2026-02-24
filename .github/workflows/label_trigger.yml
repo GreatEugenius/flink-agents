@@ -27,7 +27,7 @@ on:
       - opened
       - edited
     branches:
-      - master
+      - main
       - release-*
 
 jobs:

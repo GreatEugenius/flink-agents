@@ -18,9 +18,9 @@
 name: "Pull Request Labeler"
 
 on:
-  workflow_run:
-    workflows: [PR-Trigger]
-    types: [requested]
+  pull_request_target:
+    types:
+      - opened
 
 permissions:
   checks: write

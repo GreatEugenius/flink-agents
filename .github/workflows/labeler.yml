@@ -18,16 +18,31 @@
 name: "Pull Request Labeler"
 
 on:
-  pull_request_target:
-    types:
-      - opened
+  workflow_run:
+    workflows: [Labeler-Trigger]
+    types: [requested]
+
+permissions:
+  checks: write
+  contents: read
+  pull-requests: write
+
 jobs:
-  triage:
-    if: (github.repository == 'apache/flink-agents')
-    permissions:
-      contents: read
-      pull-requests: write
-      issues: write
+  label:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/labeler@v5
+      - name: "Checkout ${{ github.ref }} ( ${{ github.sha }} )"
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          submodules: recursive
+      - name: "Get information about the original trigger of the run"
+        uses: ./.github/actions/get-workflow-origin
+        id: source-run-info
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          sourceRunId: ${{ github.event.workflow_run.id }}
+      - uses: actions/labeler@v6
+        with:
+          repo-token: "${{ secrets.GITHUB_TOKEN }}"
+          pr-number: ${{ steps.source-run-info.outputs.pullRequestNumber }}

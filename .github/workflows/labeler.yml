@@ -22,6 +22,10 @@ on:
     workflows: [PR-Open-Trigger, PR-Edit-Trigger]
     types: [requested]
 
+concurrency:
+  group: ${{ github.event.workflow_run.name }}-${{ github.event.workflow_run.head_repository.full_name }}-${{ github.event.workflow_run.head_branch }}
+  cancel-in-progress: true
+
 permissions:
   checks: write
   contents: read

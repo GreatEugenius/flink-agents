@@ -81,6 +81,42 @@ jobs:
               labels.push(fixVersionLabel);
             }
 
+            // Add documentation label based on PR body checkboxes
+            const docLabels = ['doc-needed', 'doc-not-needed', 'doc-included'];
+            const docMissingLabel = 'doc-label-missing';
+            const prBody = pr.body || '';
+            const checkedDocLabel = docLabels.find(label => {
+              const pattern = new RegExp(`-\\s*\\[x\\]\\s*\`${label}\``, 'i');
+              return pattern.test(prBody);
+            });
+
+            // Remove all existing doc labels first
+            const { data: existingLabels } = await github.rest.issues.listLabelsOnIssue({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber,
+            });
+            const allDocLabels = [...docLabels, docMissingLabel];
+            for (const existingLabel of existingLabels) {
+              if (allDocLabels.includes(existingLabel.name)) {
+                await github.rest.issues.removeLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: prNumber,
+                  name: existingLabel.name,
+                });
+                core.info(`Removed existing doc label '${existingLabel.name}'.`);
+              }
+            }
+
+            if (checkedDocLabel) {
+              labels.push(checkedDocLabel);
+              core.info(`Documentation checkbox checked: '${checkedDocLabel}'.`);
+            } else {
+              labels.push(docMissingLabel);
+              core.info('No documentation checkbox checked, adding doc-label-missing.');
+            }
+
             if (labels.length > 0) {
               await github.rest.issues.addLabels({
                 owner: context.repo.owner,

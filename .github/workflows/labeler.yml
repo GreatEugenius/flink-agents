@@ -19,7 +19,7 @@ name: "Pull Request Labeler"
 
 on:
   workflow_run:
-    workflows: [Labeler-Trigger]
+    workflows: [PR-Open-Trigger, PR-Edit-Trigger]
     types: [requested]
 
 permissions:
@@ -57,31 +57,38 @@ jobs:
               repo: context.repo.repo,
               pull_number: prNumber,
             });
+            const triggerWorkflow = '${{ github.event.workflow_run.name }}';
+            const isOpenTrigger = triggerWorkflow === 'PR-Open-Trigger';
             const labels = [];
 
-            // Add 'priority/major' label to any PR with changed files
-            const { data: files } = await github.rest.pulls.listFiles({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              pull_number: prNumber,
-            });
-            if (files.length > 0) {
-              labels.push('priority/major');
+            // --- Labels only added on PR open (priority/major, fixVersion) ---
+
+            if (isOpenTrigger) {
+              // Add 'priority/major' label to any PR with changed files
+              const { data: files } = await github.rest.pulls.listFiles({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: prNumber,
+              });
+              if (files.length > 0) {
+                labels.push('priority/major');
+              }
+
+              // Add fixVersion label based on target branch
+              const baseBranch = pr.base.ref;
+              const fixVersionLabelMap = {
+                'main': 'fixVersion/0.3.0',
+                'release-0.2': 'fixVersion/0.2.1',
+                'release-0.1': 'fixVersion/0.1.1',
+              };
+              const fixVersionLabel = fixVersionLabelMap[baseBranch];
+              if (fixVersionLabel) {
+                labels.push(fixVersionLabel);
+              }
             }
 
-            // Add fixVersion label based on target branch
-            const baseBranch = pr.base.ref;
-            const fixVersionLabelMap = {
-              'main': 'fixVersion/0.3.0',
-              'release-0.2': 'fixVersion/0.2.1',
-              'release-0.1': 'fixVersion/0.1.1',
-            };
-            const fixVersionLabel = fixVersionLabelMap[baseBranch];
-            if (fixVersionLabel) {
-              labels.push(fixVersionLabel);
-            }
+            // --- Documentation labels (evaluated on both open and edit) ---
 
-            // Add documentation label based on PR body checkboxes
             const docLabels = ['doc-needed', 'doc-not-needed', 'doc-included'];
             const docMissingLabel = 'doc-label-missing';
             const prBody = pr.body || '';
@@ -116,6 +123,8 @@ jobs:
               labels.push(docMissingLabel);
               core.info('No documentation checkbox checked, adding doc-label-missing.');
             }
+
+            // --- Apply all labels ---
 
             if (labels.length > 0) {
               await github.rest.issues.addLabels({

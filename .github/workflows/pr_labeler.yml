@@ -55,3 +55,4 @@ jobs:
             const prNumber = parseInt('${{ steps.source-run-info.outputs.pullRequestNumber }}');
             const triggerWorkflow = '${{ github.event.workflow_run.name }}';
             await script({ github, context, core, prNumber, triggerWorkflow });
+

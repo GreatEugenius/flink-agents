@@ -64,15 +64,7 @@ jobs:
             // --- Labels only added on PR open (priority/major, fixVersion) ---
 
             if (isOpenTrigger) {
-              // Add 'priority/major' label to any PR with changed files
-              const { data: files } = await github.rest.pulls.listFiles({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                pull_number: prNumber,
-              });
-              if (files.length > 0) {
-                labels.push('priority/major');
-              }
+              labels.push('priority/major');
 
               // Add fixVersion label based on target branch
               const baseBranch = pr.base.ref;

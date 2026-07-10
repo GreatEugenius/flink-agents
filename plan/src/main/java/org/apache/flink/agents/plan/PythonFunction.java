@@ -23,12 +23,13 @@ import java.util.Objects;
 
 /** Represent a Python function. */
 public class PythonFunction implements Function {
-    private static final String CALL_PYTHON_FUNCTION = "function.call_python_function";
+    private static final String CALL_PYTHON_FUNCTION = "__fa_call_python_function";
 
     private final String module;
     private final String qualName;
 
     private transient PythonInterpreter interpreter;
+    private transient String runtimeScope;
 
     public PythonFunction(String module, String qualName) {
         this.module = module;
@@ -37,6 +38,10 @@ public class PythonFunction implements Function {
 
     public void setInterpreter(PythonInterpreter interpreter) {
         this.interpreter = interpreter;
+    }
+
+    public void setRuntimeScope(String runtimeScope) {
+        this.runtimeScope = runtimeScope;
     }
 
     @Override
@@ -48,7 +53,7 @@ public class PythonFunction implements Function {
                             + "invocation.");
         }
 
-        return interpreter.invoke(CALL_PYTHON_FUNCTION, module, qualName, args);
+        return interpreter.invoke(CALL_PYTHON_FUNCTION, runtimeScope, module, qualName, args);
     }
 
     @Override

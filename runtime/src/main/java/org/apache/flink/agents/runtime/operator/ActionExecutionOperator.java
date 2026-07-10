@@ -25,16 +25,18 @@ import org.apache.flink.agents.plan.AgentPlan;
 import org.apache.flink.agents.plan.JavaFunction;
 import org.apache.flink.agents.plan.PythonFunction;
 import org.apache.flink.agents.plan.actions.Action;
-import org.apache.flink.agents.runtime.ResourceCache;
 import org.apache.flink.agents.runtime.actionstate.ActionState;
 import org.apache.flink.agents.runtime.actionstate.ActionStateStore;
-import org.apache.flink.agents.runtime.memory.Mem0LongTermMemory;
 import org.apache.flink.agents.runtime.metrics.BuiltInMetrics;
 import org.apache.flink.agents.runtime.metrics.FlinkAgentsMetricGroupImpl;
+import org.apache.flink.agents.runtime.operator.coordinator.PlanUpdateMessages.PlanUpdateEvent;
 import org.apache.flink.agents.runtime.python.operator.PythonActionTask;
+import org.apache.flink.agents.runtime.python.utils.PythonActionExecutor;
 import org.apache.flink.agents.runtime.utils.EventUtil;
 import org.apache.flink.annotation.VisibleForTesting;
 import org.apache.flink.api.common.operators.MailboxExecutor;
+import org.apache.flink.runtime.operators.coordination.OperatorEvent;
+import org.apache.flink.runtime.operators.coordination.OperatorEventHandler;
 import org.apache.flink.runtime.state.KeyGroupRange;
 import org.apache.flink.runtime.state.StateInitializationContext;
 import org.apache.flink.runtime.state.StateSnapshotContext;
@@ -75,7 +77,7 @@ import static org.apache.flink.util.Preconditions.checkState;
  * and the resulting output event is collected for further processing.
  */
 public class ActionExecutionOperator<IN, OUT> extends AbstractStreamOperator<OUT>
-        implements OneInputStreamOperator<IN, OUT>, BoundedOneInput {
+        implements OneInputStreamOperator<IN, OUT>, BoundedOneInput, OperatorEventHandler {
 
     private static final long serialVersionUID = 1L;
 
@@ -83,7 +85,9 @@ public class ActionExecutionOperator<IN, OUT> extends AbstractStreamOperator<OUT
 
     private final AgentPlan agentPlan;
 
-    private transient ResourceCache resourceCache;
+    // Single plan-access entry: the live plan, the pending update waiting for the next checkpoint
+    // barrier, and their plan-scoped resources (classloader, resource cache).
+    private transient PlanVersionManager planManager;
 
     private transient PythonBridgeManager pythonBridge;
 
@@ -94,9 +98,6 @@ public class ActionExecutionOperator<IN, OUT> extends AbstractStreamOperator<OUT
     private final transient MailboxExecutor mailboxExecutor;
 
     private transient ActionTaskContextManager contextManager;
-
-    // Long-term memory backed by Mem0; non-null only when LongTermMemoryOptions.Mem0 is configured.
-    private transient Mem0LongTermMemory ltm;
 
     // We need to check whether the current thread is the mailbox thread using the mailbox
     // processor.
@@ -144,34 +145,39 @@ public class ActionExecutionOperator<IN, OUT> extends AbstractStreamOperator<OUT
     public void open() throws Exception {
         super.open();
 
-        stateManager.initializeKeyedStates(getRuntimeContext(), agentPlan.getConfig());
+        // From here on, everything plan-derived is built from the effective plan: the restored
+        // dynamic plan if the last checkpoint recorded a switch, otherwise the bootstrap plan.
+        // The effective plan always carries the bootstrap AgentConfiguration (job-level
+        // configuration is pinned at submission), so config reads below are stable across
+        // plan switches.
+        planManager.open(() -> getRuntimeContext().getUserCodeClassLoader());
+        AgentPlan effectivePlan = planManager.currentPlan();
+
+        stateManager.initializeKeyedStates(getRuntimeContext(), effectivePlan.getConfig());
         stateManager.initializeOperatorStates(getOperatorStateBackend());
 
-        // ResourceCache constructs its own long-lived ResourceContextImpl internally; on
-        // close() the cache cascades close to it and to the cached SkillManager, covering
-        // Flink failover when the JVM does not exit. The user-code class loader is threaded
-        // down so classpath: skill sources resolve against the Flink user JAR regardless of
-        // which thread (mailbox / Python interpreter / async pool) later triggers the lazy
-        // SkillManager construction.
-        resourceCache =
-                new ResourceCache(
-                        agentPlan.getResourceProviders(),
-                        getRuntimeContext().getUserCodeClassLoader());
-
         metricGroup = new FlinkAgentsMetricGroupImpl(getMetricGroup());
-        builtInMetrics = new BuiltInMetrics(metricGroup, agentPlan);
+        builtInMetrics = new BuiltInMetrics(metricGroup, effectivePlan);
 
         eventRouter.open(builtInMetrics);
 
-        durableExecManager.maybeInitActionStateStore(agentPlan.getConfig());
+        durableExecManager.maybeInitActionStateStore(effectivePlan.getConfig());
         durableExecManager.initRecoveryMarkerState(getOperatorStateBackend());
         durableExecManager.initializeKeyedStates(getRuntimeContext());
+        durableExecManager.setActivePlanVersion(planManager.currentPlanVersion());
 
-        // init PythonActionExecutor and PythonResourceAdapter
+        // init PythonActionExecutor and PythonResourceAdapter for the effective plan.
+        // ResourceCache (owned per plan by the PlanVersionManager) constructs its own long-lived
+        // ResourceContextImpl internally; on close() the cache cascades close to it and to the
+        // cached SkillManager, covering Flink failover when the JVM does not exit. The plan
+        // classloader is threaded down so classpath: skill sources resolve against the plan's
+        // artifact (or the Flink user JAR) regardless of which thread (mailbox / Python
+        // interpreter / async pool) later triggers the lazy SkillManager construction.
         pythonBridge = new PythonBridgeManager();
         pythonBridge.open(
-                agentPlan,
-                resourceCache,
+                planManager.currentPlanKey(),
+                effectivePlan,
+                planManager.currentResourceCache(),
                 getExecutionConfig(),
                 getRuntimeContext().getDistributedCache(),
                 getContainingTask().getEnvironment().getTaskManagerInfo().getTmpDirectories(),
@@ -181,14 +187,10 @@ public class ActionExecutionOperator<IN, OUT> extends AbstractStreamOperator<OUT
                 jobIdentifier,
                 getRuntimeContext().getUserCodeClassLoader());
 
-        // Capture the wired Mem0 long-term memory, if any, so it can be plumbed into the Java
-        // runner context created by ActionTaskContextManager.
-        ltm = pythonBridge.getLongTermMemory();
-
         // init context manager for runner context creation and memory contexts
         contextManager =
                 new ActionTaskContextManager(
-                        agentPlan.getConfig().get(AgentExecutionOptions.NUM_ASYNC_THREADS));
+                        effectivePlan.getConfig().get(AgentExecutionOptions.NUM_ASYNC_THREADS));
 
         mailboxProcessor = getMailboxProcessor();
 
@@ -217,8 +219,7 @@ public class ActionExecutionOperator<IN, OUT> extends AbstractStreamOperator<OUT
         LOG.debug("Receive an element {}", input);
 
         // wrap to InputEvent first
-        Event inputEvent =
-                eventRouter.wrapToInputEvent(input, pythonBridge.getPythonActionExecutor());
+        Event inputEvent = eventRouter.wrapToInputEvent(input, currentPythonActionExecutor());
         if (record.hasTimestamp()) {
             inputEvent.setSourceTimestamp(record.getTimestamp());
         }
@@ -247,8 +248,7 @@ public class ActionExecutionOperator<IN, OUT> extends AbstractStreamOperator<OUT
         if (EventUtil.isOutputEvent(event)) {
             // If the event is an OutputEvent, we send it downstream.
             OUT outputData =
-                    eventRouter.getOutputFromOutputEvent(
-                            event, pythonBridge.getPythonActionExecutor());
+                    eventRouter.getOutputFromOutputEvent(event, currentPythonActionExecutor());
             if (event.hasSourceTimestamp()) {
                 output.collect(
                         eventRouter
@@ -266,7 +266,8 @@ public class ActionExecutionOperator<IN, OUT> extends AbstractStreamOperator<OUT
             }
             // We then obtain the triggered action and add ActionTasks to the waiting processing
             // queue.
-            List<Action> triggerActions = eventRouter.getActionsTriggeredBy(event, agentPlan);
+            List<Action> triggerActions =
+                    eventRouter.getActionsTriggeredBy(event, planManager.currentPlan());
             if (triggerActions != null && !triggerActions.isEmpty()) {
                 for (Action triggerAction : triggerActions) {
                     stateManager.addActionTask(createActionTask(key, triggerAction, event));
@@ -319,15 +320,15 @@ public class ActionExecutionOperator<IN, OUT> extends AbstractStreamOperator<OUT
         contextManager.createAndSetRunnerContext(
                 actionTask,
                 key,
-                agentPlan,
-                resourceCache,
+                planManager.currentPlan(),
+                planManager.currentResourceCache(),
                 metricGroup,
                 jobIdentifier,
                 this::checkMailboxThread,
                 stateManager.getSensoryMemState(),
                 stateManager.getShortTermMemState(),
-                pythonBridge.getPythonRunnerContext(),
-                ltm);
+                pythonBridge.getPythonRunnerContext(planManager.currentPlanKey()),
+                pythonBridge.getLongTermMemory(planManager.currentPlanKey()));
 
         long sequenceNumber = stateManager.getSequenceNumber();
         boolean isFinished;
@@ -375,8 +376,7 @@ public class ActionExecutionOperator<IN, OUT> extends AbstractStreamOperator<OUT
 
             ActionTask.ActionTaskResult actionTaskResult =
                     actionTask.invoke(
-                            getRuntimeContext().getUserCodeClassLoader(),
-                            this.pythonBridge.getPythonActionExecutor());
+                            planManager.currentClassLoader(), currentPythonActionExecutor());
 
             // We remove the contexts from the map after the task is processed. They will be added
             // back later if the action task has a generated action task, meaning it is not
@@ -469,8 +469,8 @@ public class ActionExecutionOperator<IN, OUT> extends AbstractStreamOperator<OUT
     @Override
     public void close() throws Exception {
         // Must close before pythonInterpreter since cached resources may hold Python references.
-        if (resourceCache != null) {
-            resourceCache.close();
+        if (planManager != null) {
+            planManager.close();
         }
         if (contextManager != null) {
             contextManager.close();
@@ -497,6 +497,11 @@ public class ActionExecutionOperator<IN, OUT> extends AbstractStreamOperator<OUT
 
         stateManager = new OperatorStateManager();
 
+        // Must run before open(): the effective plan (bootstrap or the restored dynamic plan)
+        // drives every plan-derived construction there.
+        planManager = new PlanVersionManager(agentPlan);
+        planManager.initializeState(getOperatorStateBackend(), context.isRestored());
+
         // Resolve the agent's stable job identifier:
         //  - If the user set it via AgentConfigOptions.JOB_IDENTIFIER, use that.
         //  - Otherwise fall back to the current Flink JobID, cached in operator
@@ -511,11 +516,92 @@ public class ActionExecutionOperator<IN, OUT> extends AbstractStreamOperator<OUT
         }
     }
 
+    /**
+     * The plan-switch point. When a validated update is pending, the operator first drains every
+     * in-flight event chain (bounded work: the barrier already blocks new input, so only chains
+     * admitted before the barrier remain — each finishes under the old plan), then swaps the plan
+     * in place. The snapshot taken right after therefore records the switched plan together with an
+     * empty in-flight set: data before the barrier ran entirely on the old plan, data after it runs
+     * on the new one, and a restore of this checkpoint resumes directly on the new plan.
+     *
+     * <p>The drain is deliberately unbounded: it holds the barrier until every in-flight chain
+     * finishes, so a slow chain (e.g. a long LLM call) makes the checkpoint slow — possibly past
+     * the checkpoint timeout, which is expected and must be budgeted in the user's checkpoint
+     * configuration. A local drain timeout that defers the switch was rejected: subtasks would
+     * switch at different checkpoints, and since input consumption resumes right after the barrier,
+     * the next attempt would most likely fail to drain as well, starving the switch indefinitely.
+     */
+    @Override
+    public void prepareSnapshotPreBarrier(long checkpointId) throws Exception {
+        if (planManager.hasPending()) {
+            waitInFlightEventsFinished();
+            String replacedPlanKey = planManager.switchToPending();
+            pythonBridge.releasePlan(replacedPlanKey);
+            durableExecManager.setActivePlanVersion(planManager.currentPlanVersion());
+        }
+        super.prepareSnapshotPreBarrier(checkpointId);
+    }
+
+    /**
+     * Receives a plan update from the coordinator (mailbox thread). Validation and heavy
+     * preparation (artifact classloader, executability check, per-plan Python runtime) happen here
+     * — never on the barrier path. Newest wins: a newer update replaces an unswitched pending one.
+     * Duplicates and stale backfills (planVersion not newer than what this subtask knows) are
+     * no-ops, which makes the coordinator's restart backfill idempotent. A rejected update never
+     * disturbs the current plan.
+     */
+    @Override
+    public void handleOperatorEvent(OperatorEvent evt) {
+        checkState(
+                evt instanceof PlanUpdateEvent,
+                "Unexpected operator event: " + evt.getClass().getName());
+        PlanUpdateEvent event = (PlanUpdateEvent) evt;
+        if (!planManager.isNewerThanKnown(event.planVersion)) {
+            LOG.info(
+                    "Ignoring AgentPlan update with planVersion {} (already at planVersion {}).",
+                    event.planVersion,
+                    planManager.currentPlanVersion());
+            return;
+        }
+        try {
+            String discardedPlanKey =
+                    planManager.preparePending(
+                            event.planVersion, event.planId, event.canonicalPlanJson);
+            if (discardedPlanKey != null) {
+                pythonBridge.releasePlan(discardedPlanKey);
+            }
+            // Pre-build the per-plan Python runtime off the barrier path as well.
+            pythonBridge.getOrCreatePlanRuntime(
+                    planManager.pendingPlanKey(),
+                    planManager.pendingPlan(),
+                    planManager.pendingResourceCache());
+            LOG.info(
+                    "Prepared AgentPlan update with planVersion {}; switching at the next checkpoint.",
+                    event.planVersion);
+        } catch (Exception e) {
+            builtInMetrics.markDynamicPlanUpdateRejected();
+            LOG.warn(
+                    "Rejected AgentPlan update with planVersion {}; keeping the current plan (planVersion {}).",
+                    event.planVersion,
+                    planManager.currentPlanVersion(),
+                    e);
+            try {
+                String rejectedPlanKey = planManager.discardPending();
+                if (rejectedPlanKey != null) {
+                    pythonBridge.releasePlan(rejectedPlanKey);
+                }
+            } catch (Exception cleanupFailure) {
+                ExceptionUtils.rethrow(cleanupFailure);
+            }
+        }
+    }
+
     @Override
     public void snapshotState(StateSnapshotContext context) throws Exception {
         durableExecManager.snapshotRecoveryMarker();
         durableExecManager.snapshotLastCompletedSequenceNumbers(
                 getKeyedStateBackend(), context.getCheckpointId());
+        planManager.snapshotState();
 
         super.snapshotState(context);
     }
@@ -530,6 +616,11 @@ public class ActionExecutionOperator<IN, OUT> extends AbstractStreamOperator<OUT
     public void notifyCheckpointAborted(long checkpointId) throws Exception {
         durableExecManager.notifyCheckpointAborted(checkpointId);
         super.notifyCheckpointAborted(checkpointId);
+    }
+
+    /** The Python action executor of the live plan; null for pure-Java plans. */
+    private PythonActionExecutor currentPythonActionExecutor() {
+        return pythonBridge.getPythonActionExecutor(planManager.currentPlanKey());
     }
 
     private MailboxProcessor getMailboxProcessor() throws Exception {
@@ -602,6 +693,21 @@ public class ActionExecutionOperator<IN, OUT> extends AbstractStreamOperator<OUT
     @VisibleForTesting
     OperatorStateManager getOperatorStateManager() {
         return stateManager;
+    }
+
+    @VisibleForTesting
+    AgentPlan getCurrentPlanForTesting() {
+        return planManager.currentPlan();
+    }
+
+    @VisibleForTesting
+    long getCurrentPlanVersionForTesting() {
+        return planManager.currentPlanVersion();
+    }
+
+    @VisibleForTesting
+    boolean hasPendingPlanForTesting() {
+        return planManager.hasPending();
     }
 
     /** Failed to execute Action task. */

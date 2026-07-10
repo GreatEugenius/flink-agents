@@ -36,43 +36,63 @@ import static org.apache.flink.util.Preconditions.checkState;
 public class PythonActionExecutor {
 
     private static final String PYTHON_IMPORTS =
-            "from flink_agents.plan import function\n"
+            "import sys\n"
+                    + "from flink_agents.plan import function\n"
                     + "from flink_agents.runtime import flink_runner_context\n"
-                    + "from flink_agents.runtime import python_java_utils";
+                    + "from flink_agents.runtime import python_java_utils\n"
+                    + "sys.modules['function'] = function\n"
+                    + "sys.modules['flink_runner_context'] = flink_runner_context\n"
+                    + "sys.modules['python_java_utils'] = python_java_utils\n"
+                    + "def __fa_create_flink_runner_context(*args):\n"
+                    + "    return flink_runner_context.create_flink_runner_context(*args)\n"
+                    + "def __fa_switch_action_context(*args):\n"
+                    + "    return flink_runner_context.flink_runner_context_switch_action_context(*args)\n"
+                    + "def __fa_close_flink_runner_context(*args):\n"
+                    + "    return flink_runner_context.close_flink_runner_context(*args)\n"
+                    + "def __fa_create_async_thread_pool(*args):\n"
+                    + "    return flink_runner_context.create_async_thread_pool(*args)\n"
+                    + "def __fa_close_async_thread_pool(*args):\n"
+                    + "    return flink_runner_context.close_async_thread_pool(*args)\n"
+                    + "def __fa_call_python_awaitable(*args):\n"
+                    + "    return function.call_python_awaitable(*args)\n"
+                    + "def __fa_convert_json_to_python_event(*args):\n"
+                    + "    return python_java_utils.convert_json_to_python_event(*args)\n"
+                    + "def __fa_wrap_to_input_event(*args):\n"
+                    + "    return python_java_utils.wrap_to_input_event(*args)\n"
+                    + "def __fa_get_output_from_output_event(*args):\n"
+                    + "    return python_java_utils.get_output_from_output_event(*args)\n"
+                    + "def __fa_call_python_function(*args):\n"
+                    + "    return function.call_python_function(*args)";
 
     // =========== RUNNER CONTEXT ===========
-    private static final String CREATE_FLINK_RUNNER_CONTEXT =
-            "flink_runner_context.create_flink_runner_context";
+    private static final String CREATE_FLINK_RUNNER_CONTEXT = "__fa_create_flink_runner_context";
 
     private static final String FLINK_RUNNER_CONTEXT_SWITCH_ACTION_CONTEXT =
-            "flink_runner_context.flink_runner_context_switch_action_context";
+            "__fa_switch_action_context";
 
-    private static final String CLOSE_FLINK_RUNNER_CONTEXT =
-            "flink_runner_context.close_flink_runner_context";
+    private static final String CLOSE_FLINK_RUNNER_CONTEXT = "__fa_close_flink_runner_context";
 
     // ========== ASYNC THREAD POOL ===========
-    private static final String CREATE_ASYNC_THREAD_POOL =
-            "flink_runner_context.create_async_thread_pool";
-    private static final String CLOSE_ASYNC_THREAD_POOL =
-            "flink_runner_context.close_async_thread_pool";
+    private static final String CREATE_ASYNC_THREAD_POOL = "__fa_create_async_thread_pool";
+    private static final String CLOSE_ASYNC_THREAD_POOL = "__fa_close_async_thread_pool";
 
     // =========== PYTHON AWAITABLE ===========
-    private static final String CALL_PYTHON_AWAITABLE = "function.call_python_awaitable";
+    public static final String CALL_PYTHON_FUNCTION = "__fa_call_python_function";
+    private static final String CALL_PYTHON_AWAITABLE = "__fa_call_python_awaitable";
     private static final String PYTHON_AWAITABLE_VAR_NAME_PREFIX = "python_awaitable_";
     private static final AtomicLong PYTHON_AWAITABLE_VAR_ID = new AtomicLong(0);
 
     // =========== PYTHON AND JAVA OBJECT CONVERT ===========
-    private static final String CONVERT_JSON_TO_PYTHON_EVENT =
-            "python_java_utils.convert_json_to_python_event";
-    private static final String WRAP_TO_INPUT_EVENT = "python_java_utils.wrap_to_input_event";
-    private static final String GET_OUTPUT_FROM_OUTPUT_EVENT =
-            "python_java_utils.get_output_from_output_event";
+    private static final String CONVERT_JSON_TO_PYTHON_EVENT = "__fa_convert_json_to_python_event";
+    private static final String WRAP_TO_INPUT_EVENT = "__fa_wrap_to_input_event";
+    private static final String GET_OUTPUT_FROM_OUTPUT_EVENT = "__fa_get_output_from_output_event";
 
     private final PythonInterpreter interpreter;
     private final AgentPlan agentPlan;
     private final PythonRunnerContextImpl runnerContext;
     private final JavaResourceAdapter javaResourceAdapter;
     private final String jobIdentifier;
+    private final String pythonFunctionScope;
     private PyObject pythonAsyncThreadPool;
     private PyObject pythonRunnerContext;
 
@@ -81,13 +101,15 @@ public class PythonActionExecutor {
             AgentPlan agentPlan,
             JavaResourceAdapter javaResourceAdapter,
             PythonRunnerContextImpl runnerContext,
-            String jobIdentifier)
+            String jobIdentifier,
+            String pythonFunctionScope)
             throws JsonProcessingException {
         this.interpreter = interpreter;
         this.agentPlan = agentPlan;
         this.runnerContext = runnerContext;
         this.javaResourceAdapter = javaResourceAdapter;
         this.jobIdentifier = jobIdentifier;
+        this.pythonFunctionScope = pythonFunctionScope;
     }
 
     public PyObject getPythonRunnerContext() {
@@ -128,6 +150,7 @@ public class PythonActionExecutor {
             throws Exception {
         runnerContext.checkNoPendingEvents();
         function.setInterpreter(interpreter);
+        function.setRuntimeScope(pythonFunctionScope);
 
         interpreter.invoke(
                 FLINK_RUNNER_CONTEXT_SWITCH_ACTION_CONTEXT, pythonRunnerContext, hashOfKey);

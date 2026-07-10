@@ -34,15 +34,20 @@ import org.apache.flink.agents.runtime.python.utils.PythonActionExecutor;
 import org.apache.flink.agents.runtime.python.utils.PythonResourceAdapterImpl;
 import org.apache.flink.api.common.ExecutionConfig;
 import org.apache.flink.api.common.JobID;
+import org.apache.flink.api.common.cache.DistributedCache;
 import org.apache.flink.python.env.PythonDependencyInfo;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import pemja.core.PythonInterpreter;
+import pemja.core.PythonInterpreterConfig;
 import pemja.core.object.PyObject;
 
 import javax.annotation.Nullable;
 
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.HashMap;
+import java.util.Map;
 
 import static org.apache.flink.agents.plan.actions.Utils.requiredVersions;
 import static org.apache.flink.agents.plan.actions.Utils.supportAsync;
@@ -76,16 +81,27 @@ class PythonBridgeManager implements AutoCloseable {
 
     private static final Logger LOG = LoggerFactory.getLogger(PythonBridgeManager.class);
 
+    static final String PYTHON_ARTIFACT_PATH_CONFIG = "dynamic-plan.python-artifact.path";
+    static final String PYTHON_ARTIFACT_SHA256_CONFIG = "dynamic-plan.python-artifact.sha256";
+    static final String PYTHON_RUNTIME_PATH_CONFIG = "dynamic-plan.python-runtime.path";
+
     private PythonEnvironmentManager pythonEnvironmentManager;
-    private PythonInterpreter pythonInterpreter;
-    private PythonActionExecutor pythonActionExecutor;
-    private PythonRunnerContextImpl pythonRunnerContext;
-    private PythonResourceAdapterImpl pythonResourceAdapter;
-    private JavaResourceAdapter javaResourceAdapter;
-    private Mem0LongTermMemory longTermMemory;
+    private final Map<String, PlanPythonRuntime> planRuntimes;
+    private String initialPlanId;
+
+    private ExecutionConfig executionConfig;
+    private DistributedCache distributedCache;
+    private String[] tmpDirs;
+    private JobID jobId;
+    private FlinkAgentsMetricGroupImpl metricGroup;
+    private Runnable mailboxThreadChecker;
+    private String jobIdentifier;
+    private ClassLoader userCodeClassLoader;
+
     private boolean initialized;
 
     PythonBridgeManager() {
+        this.planRuntimes = new HashMap<>();
         this.initialized = false;
     }
 
@@ -114,10 +130,11 @@ class PythonBridgeManager implements AutoCloseable {
      *     env.add_jars(...)}.
      */
     void open(
+            String initialPlanId,
             AgentPlan agentPlan,
             ResourceCache resourceCache,
             ExecutionConfig executionConfig,
-            org.apache.flink.api.common.cache.DistributedCache distributedCache,
+            DistributedCache distributedCache,
             String[] tmpDirs,
             JobID jobId,
             FlinkAgentsMetricGroupImpl metricGroup,
@@ -125,58 +142,156 @@ class PythonBridgeManager implements AutoCloseable {
             String jobIdentifier,
             ClassLoader userCodeClassLoader)
             throws Exception {
-        boolean containPythonAction =
-                agentPlan.getActions().values().stream()
-                        .anyMatch(action -> action.getExec() instanceof PythonFunction);
+        this.executionConfig = executionConfig;
+        this.distributedCache = distributedCache;
+        this.tmpDirs = tmpDirs;
+        this.jobId = jobId;
+        this.metricGroup = metricGroup;
+        this.mailboxThreadChecker = mailboxThreadChecker;
+        this.jobIdentifier = jobIdentifier;
+        this.userCodeClassLoader = userCodeClassLoader;
+        this.initialPlanId = initialPlanId;
 
-        boolean containPythonResource =
-                agentPlan.getResourceProviders().values().stream()
-                        .anyMatch(
-                                resourceProviderMap ->
-                                        resourceProviderMap.values().stream()
-                                                .anyMatch(
-                                                        resourceProvider ->
-                                                                resourceProvider
-                                                                        instanceof
-                                                                        PythonResourceProvider));
+        getOrCreatePlanRuntime(initialPlanId, agentPlan, resourceCache);
+    }
 
+    PlanPythonRuntime getOrCreatePlanRuntime(
+            String planId, AgentPlan agentPlan, ResourceCache resourceCache) throws Exception {
+        PlanPythonRuntime runtime = planRuntimes.get(planId);
+        if (runtime != null) {
+            return runtime;
+        }
+
+        boolean containPythonAction = containsPythonAction(agentPlan);
+        boolean containPythonResource = containsPythonResource(agentPlan);
         boolean mem0Configured = isMem0Configured(agentPlan);
 
-        if (containPythonAction || containPythonResource || mem0Configured) {
-            LOG.debug("Begin initialize PythonEnvironmentManager.");
-            PythonDependencyInfo dependencyInfo =
-                    PythonDependencyInfo.create(
-                            executionConfig.toConfiguration(), distributedCache);
-            pythonEnvironmentManager =
-                    new PythonEnvironmentManager(
-                            dependencyInfo, tmpDirs, new HashMap<>(System.getenv()), jobId);
-            pythonEnvironmentManager.open();
-            EmbeddedPythonEnvironment env = pythonEnvironmentManager.createEnvironment();
-            pythonInterpreter = env.getInterpreter();
-            pythonRunnerContext =
-                    new PythonRunnerContextImpl(
-                            metricGroup,
-                            mailboxThreadChecker,
-                            agentPlan,
-                            resourceCache,
-                            jobIdentifier);
-
-            javaResourceAdapter =
-                    new JavaResourceAdapter(
-                            resourceCache.getResourceContext(),
-                            pythonInterpreter,
-                            userCodeClassLoader);
-            if (containPythonResource || mem0Configured) {
-                initPythonResourceAdapter(agentPlan, resourceCache);
-            }
-            if (containPythonAction || mem0Configured) {
-                initPythonActionExecutor(agentPlan, jobIdentifier);
-            }
-            if (mem0Configured) {
-                wireLongTermMemory();
-            }
-            initialized = true;
+        if (!containPythonAction && !containPythonResource && !mem0Configured) {
+            return null;
         }
+
+        PythonInterpreter interpreter = createPythonInterpreter(agentPlan);
+
+        PythonRunnerContextImpl pythonRunnerContext =
+                new PythonRunnerContextImpl(
+                        metricGroup, mailboxThreadChecker, agentPlan, resourceCache, jobIdentifier);
+        JavaResourceAdapter javaResourceAdapter =
+                new JavaResourceAdapter(
+                        resourceCache.getResourceContext(), interpreter, userCodeClassLoader);
+
+        PythonResourceAdapterImpl pythonResourceAdapter = null;
+        if (containPythonResource || mem0Configured) {
+            pythonResourceAdapter =
+                    initPythonResourceAdapter(
+                            agentPlan, resourceCache, javaResourceAdapter, interpreter);
+        }
+
+        PythonActionExecutor pythonActionExecutor = null;
+        if (containPythonAction || mem0Configured) {
+            pythonActionExecutor =
+                    initPythonActionExecutor(
+                            planId,
+                            agentPlan,
+                            javaResourceAdapter,
+                            pythonRunnerContext,
+                            interpreter);
+        }
+
+        Mem0LongTermMemory longTermMemory = null;
+        if (mem0Configured) {
+            longTermMemory =
+                    wireLongTermMemory(pythonActionExecutor, pythonResourceAdapter, interpreter);
+        }
+
+        runtime =
+                new PlanPythonRuntime(
+                        pythonActionExecutor,
+                        pythonRunnerContext,
+                        pythonResourceAdapter,
+                        javaResourceAdapter,
+                        longTermMemory,
+                        interpreter);
+        planRuntimes.put(planId, runtime);
+        return runtime;
+    }
+
+    private PythonInterpreter createPythonInterpreter(AgentPlan agentPlan) throws Exception {
+        ensurePythonEnvironment();
+        EmbeddedPythonEnvironment env = pythonEnvironmentManager.createEnvironment();
+        PythonInterpreterConfig baseConfig = env.getConfig();
+        PythonInterpreterConfig.PythonInterpreterConfigBuilder builder =
+                PythonInterpreterConfig.newBuilder().setExcType(baseConfig.getExecType());
+
+        String runtimePath = agentPlan.getConfig().getStr(PYTHON_RUNTIME_PATH_CONFIG, null);
+        if (runtimePath != null && !runtimePath.trim().isEmpty()) {
+            Path path = Path.of(runtimePath);
+            org.apache.flink.util.Preconditions.checkState(
+                    Files.exists(path), "Python runtime path %s does not exist.", runtimePath);
+            builder.addPythonPaths(path.toString());
+        }
+
+        String artifactPath = agentPlan.getConfig().getStr(PYTHON_ARTIFACT_PATH_CONFIG, null);
+        if (artifactPath != null && !artifactPath.trim().isEmpty()) {
+            Path path = Path.of(artifactPath);
+            org.apache.flink.util.Preconditions.checkState(
+                    Files.exists(path), "Python artifact path %s does not exist.", artifactPath);
+            String expectedSha256 =
+                    agentPlan.getConfig().getStr(PYTHON_ARTIFACT_SHA256_CONFIG, null);
+            if (expectedSha256 != null && !expectedSha256.trim().isEmpty()) {
+                String actual =
+                        org.apache.flink.agents.runtime.operator.coordinator.PlanIds
+                                .sha256HexOfFile(path);
+                org.apache.flink.util.Preconditions.checkState(
+                        actual.equalsIgnoreCase(expectedSha256.trim()),
+                        "Python artifact %s failed sha256 verification: expected %s but was %s.",
+                        artifactPath,
+                        expectedSha256,
+                        actual);
+            }
+            builder.addPythonPaths(path.toString());
+        }
+
+        builder.addPythonPaths(baseConfig.getPaths());
+        if (baseConfig.getPythonHome() != null) {
+            builder.setPythonHome(baseConfig.getPythonHome());
+        }
+        if (baseConfig.getWorkingDirectory() != null) {
+            builder.setWorkingDirectory(baseConfig.getWorkingDirectory());
+        }
+        if (baseConfig.getPythonExec() != null) {
+            builder.setPythonExec(baseConfig.getPythonExec());
+        }
+        return new PythonInterpreter(builder.build());
+    }
+
+    private void ensurePythonEnvironment() throws Exception {
+        if (initialized) {
+            return;
+        }
+        LOG.debug("Begin initialize PythonEnvironmentManager.");
+        PythonDependencyInfo dependencyInfo =
+                PythonDependencyInfo.create(executionConfig.toConfiguration(), distributedCache);
+        pythonEnvironmentManager =
+                new PythonEnvironmentManager(
+                        dependencyInfo, tmpDirs, new HashMap<>(System.getenv()), jobId);
+        pythonEnvironmentManager.open();
+        initialized = true;
+    }
+
+    private boolean containsPythonAction(AgentPlan agentPlan) {
+        return agentPlan.getActions().values().stream()
+                .anyMatch(action -> action.getExec() instanceof PythonFunction);
+    }
+
+    private boolean containsPythonResource(AgentPlan agentPlan) {
+        return agentPlan.getResourceProviders().values().stream()
+                .anyMatch(
+                        resourceProviderMap ->
+                                resourceProviderMap.values().stream()
+                                        .anyMatch(
+                                                resourceProvider ->
+                                                        resourceProvider
+                                                                instanceof PythonResourceProvider));
     }
 
     /**
@@ -220,9 +335,12 @@ class PythonBridgeManager implements AutoCloseable {
      * {@code create_flink_runner_context} already initialised via {@code _init_long_term_memory})
      * and wrap it as a Java {@link Mem0LongTermMemory}.
      */
-    private void wireLongTermMemory() {
+    private Mem0LongTermMemory wireLongTermMemory(
+            PythonActionExecutor pythonActionExecutor,
+            PythonResourceAdapterImpl pythonResourceAdapter,
+            PythonInterpreter interpreter) {
         PyObject pyCtx = pythonActionExecutor.getPythonRunnerContext();
-        Object pyLtm = pythonInterpreter.invoke("python_java_utils.get_long_term_memory", pyCtx);
+        Object pyLtm = interpreter.invokeMethod("python_java_utils", "get_long_term_memory", pyCtx);
         if (pyLtm == null) {
             throw new IllegalStateException(
                     String.format(
@@ -234,47 +352,84 @@ class PythonBridgeManager implements AutoCloseable {
                             LongTermMemoryOptions.Mem0.EMBEDDING_MODEL_SETUP.getKey(),
                             LongTermMemoryOptions.Mem0.VECTOR_STORE.getKey()));
         }
-        longTermMemory = new Mem0LongTermMemory(pythonResourceAdapter, (PyObject) pyLtm);
+        return new Mem0LongTermMemory(pythonResourceAdapter, (PyObject) pyLtm);
     }
 
-    private void initPythonActionExecutor(AgentPlan agentPlan, String jobIdentifier)
+    private PythonActionExecutor initPythonActionExecutor(
+            String planId,
+            AgentPlan agentPlan,
+            JavaResourceAdapter javaResourceAdapter,
+            PythonRunnerContextImpl pythonRunnerContext,
+            PythonInterpreter interpreter)
             throws Exception {
-        pythonActionExecutor =
+        PythonActionExecutor pythonActionExecutor =
                 new PythonActionExecutor(
-                        pythonInterpreter,
+                        interpreter,
                         agentPlan,
                         javaResourceAdapter,
                         pythonRunnerContext,
-                        jobIdentifier);
+                        jobIdentifier,
+                        pythonFunctionScope(planId, interpreter));
         pythonActionExecutor.open();
-    }
-
-    private void initPythonResourceAdapter(AgentPlan agentPlan, ResourceCache resourceCache)
-            throws Exception {
-        pythonResourceAdapter =
-                new PythonResourceAdapterImpl(
-                        resourceCache.getResourceContext(), pythonInterpreter, javaResourceAdapter);
-        pythonResourceAdapter.open();
-        PythonMCPResourceDiscovery.discoverPythonMCPResources(
-                agentPlan.getResourceProviders(), pythonResourceAdapter, resourceCache);
-    }
-
-    /**
-     * @return the Python action executor, or {@code null} if the agent plan contains no Python
-     *     actions (or {@link #open} has not yet been called).
-     */
-    @Nullable
-    PythonActionExecutor getPythonActionExecutor() {
         return pythonActionExecutor;
     }
 
     /**
-     * @return the Python runner context, or {@code null} if no Python runtime was initialized
-     *     because the agent plan has neither Python actions nor Python resources.
+     * Framework-level function-cache scope: a runtime-instance identity (job + plan + interpreter
+     * identity), never checkpointed. Multiple interpreters do not isolate module-global caches in
+     * embedded Python, so the cache key must carry this scope.
+     */
+    private String pythonFunctionScope(String planId, PythonInterpreter interpreter) {
+        return jobIdentifier
+                + "-plan-"
+                + planId
+                + "-interpreter-"
+                + System.identityHashCode(interpreter);
+    }
+
+    private PythonResourceAdapterImpl initPythonResourceAdapter(
+            AgentPlan agentPlan,
+            ResourceCache resourceCache,
+            JavaResourceAdapter javaResourceAdapter,
+            PythonInterpreter interpreter)
+            throws Exception {
+        PythonResourceAdapterImpl pythonResourceAdapter =
+                new PythonResourceAdapterImpl(
+                        resourceCache.getResourceContext(), interpreter, javaResourceAdapter);
+        pythonResourceAdapter.open();
+        PythonMCPResourceDiscovery.discoverPythonMCPResources(
+                agentPlan.getResourceProviders(), pythonResourceAdapter, resourceCache);
+        return pythonResourceAdapter;
+    }
+
+    /**
+     * @return the Python action executor for the initial plan, or {@code null} if the agent plan
+     *     contains no Python actions (or {@link #open} has not yet been called).
+     */
+    @Nullable
+    PythonActionExecutor getPythonActionExecutor() {
+        return getPythonActionExecutor(initialPlanId);
+    }
+
+    @Nullable
+    PythonActionExecutor getPythonActionExecutor(String planId) {
+        PlanPythonRuntime runtime = planRuntimes.get(planId);
+        return runtime == null ? null : runtime.pythonActionExecutor;
+    }
+
+    /**
+     * @return the Python runner context for the initial plan, or {@code null} if no Python runtime
+     *     was initialized because the agent plan has neither Python actions nor Python resources.
      */
     @Nullable
     PythonRunnerContextImpl getPythonRunnerContext() {
-        return pythonRunnerContext;
+        return getPythonRunnerContext(initialPlanId);
+    }
+
+    @Nullable
+    PythonRunnerContextImpl getPythonRunnerContext(String planId) {
+        PlanPythonRuntime runtime = planRuntimes.get(planId);
+        return runtime == null ? null : runtime.pythonRunnerContext;
     }
 
     /**
@@ -282,23 +437,104 @@ class PythonBridgeManager implements AutoCloseable {
      */
     @Nullable
     Mem0LongTermMemory getLongTermMemory() {
-        return longTermMemory;
+        return getLongTermMemory(initialPlanId);
+    }
+
+    @Nullable
+    Mem0LongTermMemory getLongTermMemory(String planId) {
+        PlanPythonRuntime runtime = planRuntimes.get(planId);
+        return runtime == null ? null : runtime.longTermMemory;
     }
 
     boolean isInitialized() {
         return initialized;
     }
 
+    void releasePlan(String planId) throws Exception {
+        PlanPythonRuntime runtime = planRuntimes.remove(planId);
+        if (runtime != null) {
+            runtime.close();
+        }
+    }
+
     @Override
     public void close() throws Exception {
-        if (pythonActionExecutor != null) {
-            pythonActionExecutor.close();
+        Exception firstException = null;
+        for (PlanPythonRuntime runtime : planRuntimes.values()) {
+            try {
+                runtime.close();
+            } catch (Exception e) {
+                if (firstException == null) {
+                    firstException = e;
+                } else {
+                    firstException.addSuppressed(e);
+                }
+            }
         }
-        if (pythonInterpreter != null) {
-            pythonInterpreter.close();
-        }
+        planRuntimes.clear();
         if (pythonEnvironmentManager != null) {
-            pythonEnvironmentManager.close();
+            try {
+                pythonEnvironmentManager.close();
+            } catch (Exception e) {
+                if (firstException == null) {
+                    firstException = e;
+                } else {
+                    firstException.addSuppressed(e);
+                }
+            }
+        }
+        if (firstException != null) {
+            throw firstException;
+        }
+    }
+
+    static final class PlanPythonRuntime implements AutoCloseable {
+        private final PythonActionExecutor pythonActionExecutor;
+        private final PythonRunnerContextImpl pythonRunnerContext;
+        private final PythonResourceAdapterImpl pythonResourceAdapter;
+        private final JavaResourceAdapter javaResourceAdapter;
+        private final Mem0LongTermMemory longTermMemory;
+        private final PythonInterpreter pythonInterpreter;
+
+        private PlanPythonRuntime(
+                PythonActionExecutor pythonActionExecutor,
+                PythonRunnerContextImpl pythonRunnerContext,
+                PythonResourceAdapterImpl pythonResourceAdapter,
+                JavaResourceAdapter javaResourceAdapter,
+                Mem0LongTermMemory longTermMemory,
+                PythonInterpreter pythonInterpreter) {
+            this.pythonActionExecutor = pythonActionExecutor;
+            this.pythonRunnerContext = pythonRunnerContext;
+            this.pythonResourceAdapter = pythonResourceAdapter;
+            this.javaResourceAdapter = javaResourceAdapter;
+            this.longTermMemory = longTermMemory;
+            this.pythonInterpreter = pythonInterpreter;
+        }
+
+        @Override
+        public void close() throws Exception {
+            Exception firstException = null;
+            if (pythonActionExecutor != null) {
+                try {
+                    pythonActionExecutor.close();
+                } catch (Exception e) {
+                    firstException = e;
+                }
+            }
+            if (pythonInterpreter != null) {
+                try {
+                    pythonInterpreter.close();
+                } catch (Exception e) {
+                    if (firstException == null) {
+                        firstException = e;
+                    } else {
+                        firstException.addSuppressed(e);
+                    }
+                }
+            }
+            if (firstException != null) {
+                throw firstException;
+            }
         }
     }
 }

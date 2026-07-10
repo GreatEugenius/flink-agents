@@ -42,6 +42,7 @@ class PythonBridgeManagerTest {
 
         try (PythonBridgeManager bridge = new PythonBridgeManager()) {
             bridge.open(
+                    "plan-0",
                     plan,
                     /* resourceCache */ null,
                     new ExecutionConfig(),

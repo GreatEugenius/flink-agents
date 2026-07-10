@@ -19,15 +19,16 @@
 import importlib
 import inspect
 import logging
+import sys
 from abc import ABC, abstractmethod
-from typing import Any, Callable, Dict, List, Tuple, get_type_hints
+from typing import Any, Callable, Dict, List, Optional, Tuple, get_type_hints
 
 from pydantic import BaseModel, PrivateAttr, model_serializer
 
 from flink_agents.plan.utils import check_type_match
 
 # Global cache for PythonFunction instances to avoid repeated creation
-_PYTHON_FUNCTION_CACHE: Dict[Tuple[str, str], "PythonFunction"] = {}
+_PYTHON_FUNCTION_CACHE: Dict[Tuple[Any, ...], "PythonFunction"] = {}
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
@@ -99,6 +100,13 @@ def _is_function_cacheable(func: Callable) -> bool:
         return False
 
     return True
+
+
+def _drop_loaded_module(module: str) -> None:
+    """Force the next import to resolve the module from the current sys.path."""
+    for loaded_name in list(sys.modules):
+        if loaded_name == module or loaded_name.startswith(module + "."):
+            del sys.modules[loaded_name]
 
 
 class Function(BaseModel, ABC):
@@ -314,15 +322,20 @@ class JavaFunction(Function):
             raise TypeError(msg)
 
 
-def call_python_function(module: str, qualname: str, func_args: Tuple[Any, ...]) -> Any:
+def call_python_function(*call_args: Tuple[Any, ...]) -> Any:
     """Used to call a Python function in the Pemja environment.
 
     Uses selective caching to reuse PythonFunction instances for identical
     (module, qualname) pairs to improve performance during frequent invocations.
+    Dynamic plan runtimes may pass an additional scope argument so the same
+    module and qualname can be loaded from different plan artifacts without
+    sharing a cached function object.
     Only caches functions that are safe to cache (no closures, generators, etc.).
 
     Parameters
     ----------
+    scope : Optional[str]
+        Optional runtime scope for dynamic plan artifact isolation.
     module : str
         Name of the Python module where the function is defined.
     qualname : str
@@ -335,11 +348,24 @@ def call_python_function(module: str, qualname: str, func_args: Tuple[Any, ...])
     Any
         The result of calling the function with the provided arguments.
     """
-    cache_key = (module, qualname)
+    if len(call_args) == 3:
+        scope: Optional[str] = None
+        module, qualname, func_args = call_args
+        cache_key = (module, qualname)
+    elif len(call_args) == 4:
+        scope, module, qualname, func_args = call_args
+        cache_key = (scope, module, qualname)
+    else:
+        raise TypeError(
+            "call_python_function expects (module, qualname, args) or "
+            "(scope, module, qualname, args)"
+        )
 
     python_func = None
 
     if cache_key not in _PYTHON_FUNCTION_CACHE:
+        if scope is not None:
+            _drop_loaded_module(module)
         python_func = PythonFunction(module=module, qualname=qualname)
         if python_func.is_cacheable():
             _PYTHON_FUNCTION_CACHE[cache_key] = python_func

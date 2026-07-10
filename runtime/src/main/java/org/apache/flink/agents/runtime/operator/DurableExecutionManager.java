@@ -131,6 +131,17 @@ class DurableExecutionManager implements ActionStatePersister, AutoCloseable {
         return actionStateStore != null;
     }
 
+    /**
+     * Scopes durable action-state keys by the live plan version so a replay never reuses results
+     * written under a different plan (relevant in the aborted-switch-checkpoint window). Called at
+     * open with the restored plan version and again at every plan switch.
+     */
+    void setActivePlanVersion(long planVersion) {
+        if (actionStateStore != null) {
+            actionStateStore.setActivePlanVersion(planVersion);
+        }
+    }
+
     void initRecoveryMarkerState(OperatorStateBackend operatorStateBackend) throws Exception {
         if (actionStateStore != null) {
             recoveryMarkerOpState =

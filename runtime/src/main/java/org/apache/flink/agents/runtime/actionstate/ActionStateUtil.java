@@ -44,21 +44,38 @@ public class ActionStateUtil {
     public static String generateKey(
             @Nonnull Object key, long seqNum, @Nonnull Action action, @Nonnull Event event)
             throws IOException {
+        return generateKey(key, seqNum, action, event, 0L);
+    }
+
+    /**
+     * Variant scoped by the dynamic plan sequence: results written under one plan version are never
+     * replayed into another. {@code planVersion <= 0} (static or bootstrap plan) keeps the legacy
+     * 4-part key format.
+     */
+    public static String generateKey(
+            @Nonnull Object key,
+            long seqNum,
+            @Nonnull Action action,
+            @Nonnull Event event,
+            long planVersion)
+            throws IOException {
         Preconditions.checkNotNull(key, "key cannot be null.");
         Preconditions.checkNotNull(action, "action cannot be null.");
         Preconditions.checkNotNull(event, "event cannot be null.");
-        return String.join(
-                KEY_SEPARATOR,
-                key.toString(),
-                String.valueOf(seqNum),
-                generateUUIDForEvent(event),
-                generateUUIDForAction(action));
+        String baseKey =
+                String.join(
+                        KEY_SEPARATOR,
+                        key.toString(),
+                        String.valueOf(seqNum),
+                        generateUUIDForEvent(event),
+                        generateUUIDForAction(action));
+        return planVersion <= 0 ? baseKey : String.join(KEY_SEPARATOR, baseKey, "p" + planVersion);
     }
 
     public static List<String> parseKey(String key) {
         Preconditions.checkNotNull(key, "key cannot be null.");
         String[] parts = key.split(KEY_SEPARATOR);
-        Preconditions.checkArgument(parts.length == 4, "Invalid key format.");
+        Preconditions.checkArgument(parts.length == 4 || parts.length == 5, "Invalid key format.");
         return List.of(parts);
     }
 

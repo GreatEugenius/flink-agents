@@ -46,7 +46,9 @@ import javax.annotation.Nullable;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Collections;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 import static org.apache.flink.agents.plan.actions.Utils.requiredVersions;
@@ -76,6 +78,16 @@ import static org.apache.flink.agents.plan.actions.Utils.supportAsync;
  * <p>Design constraint: package-private; no manager-to-manager held references. Other managers
  * receive what they need (e.g. the Python runner context, the action executor) via method
  * parameters.
+ *
+ * <p>Dynamic plans: each plan gets its own {@link PlanPythonRuntime} (interpreter, executor, runner
+ * context, adapters), but in pemja MULTI_THREAD mode all interpreters share one CPython — {@code
+ * sys.modules} and {@code sys.path} are process-global. User code is therefore layered: the base
+ * layer distributed at job submission, plus one active artifact overlay. {@link
+ * #getOrCreatePlanRuntime} (prepare) builds the runtime without touching the shared module world;
+ * {@link #activatePlan} (operator open, or the barrier switch point after the drain) swaps the
+ * overlay: it evicts retired-artifact modules and base-layer modules the new artifact shadows, then
+ * runs deferred resource discovery. Only pure-Python user code is updatable this way — already
+ * imported C extensions and site-packages dependencies are not reloadable in-process.
  */
 class PythonBridgeManager implements AutoCloseable {
 
@@ -153,6 +165,10 @@ class PythonBridgeManager implements AutoCloseable {
         this.initialPlanId = initialPlanId;
 
         getOrCreatePlanRuntime(initialPlanId, agentPlan, resourceCache);
+        // The effective plan at open() may be a restored dynamic plan whose code lives in an
+        // artifact: activate its overlay (sys.path + deferred resource discovery) right away.
+        // There is no retired plan at open, so this never evicts anything by origin.
+        activatePlan(initialPlanId, null);
     }
 
     PlanPythonRuntime getOrCreatePlanRuntime(
@@ -170,7 +186,12 @@ class PythonBridgeManager implements AutoCloseable {
             return null;
         }
 
-        PythonInterpreter interpreter = createPythonInterpreter(agentPlan);
+        // Verify artifact locations at prepare time (fail fast, before this plan can become
+        // pending), but keep them out of the shared sys.path until activatePlan.
+        List<String> artifactRoots = verifiedArtifactRoots(agentPlan);
+        List<String> runtimeRoots = runtimeRoots(agentPlan);
+
+        PythonInterpreter interpreter = createPythonInterpreter();
 
         PythonRunnerContextImpl pythonRunnerContext =
                 new PythonRunnerContextImpl(
@@ -182,8 +203,7 @@ class PythonBridgeManager implements AutoCloseable {
         PythonResourceAdapterImpl pythonResourceAdapter = null;
         if (containPythonResource || mem0Configured) {
             pythonResourceAdapter =
-                    initPythonResourceAdapter(
-                            agentPlan, resourceCache, javaResourceAdapter, interpreter);
+                    initPythonResourceAdapter(resourceCache, javaResourceAdapter, interpreter);
         }
 
         PythonActionExecutor pythonActionExecutor = null;
@@ -210,46 +230,142 @@ class PythonBridgeManager implements AutoCloseable {
                         pythonResourceAdapter,
                         javaResourceAdapter,
                         longTermMemory,
-                        interpreter);
+                        interpreter,
+                        agentPlan,
+                        resourceCache,
+                        artifactRoots,
+                        runtimeRoots,
+                        pythonFunctionScope(planId, interpreter));
         planRuntimes.put(planId, runtime);
         return runtime;
     }
 
-    private PythonInterpreter createPythonInterpreter(AgentPlan agentPlan) throws Exception {
+    /**
+     * Makes {@code newPlanId}'s artifact the active overlay of the shared CPython module world and
+     * retires {@code retiredPlanId}'s runtime.
+     *
+     * <p>MUST only run when no Python code of the retired plan can still execute: at operator
+     * {@code open()} (no retired plan) or at the barrier switch point after the pre-barrier drain.
+     * The Python side evicts (1) all modules loaded from the retired artifact and (2) all module
+     * names the new artifact provides (so it can shadow already-imported base-layer modules), then
+     * swaps the overlay paths in {@code sys.path}. Resource discovery that eagerly imports user
+     * code (MCP) is deferred to this point for the same reason.
+     */
+    void activatePlan(String newPlanId, @Nullable String retiredPlanId) throws Exception {
+        PlanPythonRuntime newRuntime = planRuntimes.get(newPlanId);
+        PlanPythonRuntime retiredRuntime =
+                retiredPlanId == null ? null : planRuntimes.get(retiredPlanId);
+
+        PythonInterpreter interpreter =
+                newRuntime != null
+                        ? newRuntime.pythonInterpreter
+                        : (retiredRuntime != null ? retiredRuntime.pythonInterpreter : null);
+        if (interpreter != null) {
+            String[] oldRoots =
+                    retiredRuntime == null
+                            ? new String[0]
+                            : retiredRuntime.artifactRoots.toArray(new String[0]);
+            String[] newRoots =
+                    newRuntime == null
+                            ? new String[0]
+                            : newRuntime.artifactRoots.toArray(new String[0]);
+            String[] pathOnlyRoots =
+                    newRuntime == null
+                            ? new String[0]
+                            : newRuntime.runtimeRoots.toArray(new String[0]);
+            String retiredScope = retiredRuntime == null ? "" : retiredRuntime.functionScope;
+
+            interpreter.exec(
+                    "import sys\n"
+                            + "from flink_agents.runtime import plan_artifact as __fa_plan_artifact\n"
+                            + "sys.modules['__fa_plan_artifact'] = __fa_plan_artifact");
+            Object evicted =
+                    interpreter.invokeMethod(
+                            "__fa_plan_artifact",
+                            "activate_plan_artifact",
+                            oldRoots,
+                            newRoots,
+                            pathOnlyRoots,
+                            retiredScope);
+            LOG.info(
+                    "Activated Python artifact for plan {} (retired plan {}); evicted modules: {}",
+                    newPlanId,
+                    retiredPlanId,
+                    evicted);
+        }
+
+        if (newRuntime != null) {
+            runDeferredResourceDiscovery(newRuntime);
+        }
+        if (retiredPlanId != null) {
+            releasePlan(retiredPlanId);
+        }
+    }
+
+    /**
+     * MCP discovery instantiates resource providers, which may import user artifact code — so it
+     * must not run at prepare time (the artifact overlay is not active yet and the old plan is
+     * still running). It runs once per plan runtime, at activation.
+     */
+    private void runDeferredResourceDiscovery(PlanPythonRuntime runtime) throws Exception {
+        if (runtime.pythonResourceAdapter == null || runtime.mcpDiscovered) {
+            return;
+        }
+        PythonMCPResourceDiscovery.discoverPythonMCPResources(
+                runtime.agentPlan.getResourceProviders(),
+                runtime.pythonResourceAdapter,
+                runtime.resourceCache);
+        runtime.mcpDiscovered = true;
+    }
+
+    /**
+     * Validated artifact root of the plan, or an empty list. Verified (existence + sha256) at
+     * prepare time, but NOT wired into {@code sys.path} here: in pemja MULTI_THREAD mode all
+     * interpreters share one CPython, so mutating {@code sys.path} at prepare time would let the
+     * still-running old plan lazily import new code. The path becomes visible only in {@link
+     * #activatePlan}, after the pre-barrier drain.
+     */
+    private List<String> verifiedArtifactRoots(AgentPlan agentPlan) throws Exception {
+        String artifactPath = agentPlan.getConfig().getStr(PYTHON_ARTIFACT_PATH_CONFIG, null);
+        if (artifactPath == null || artifactPath.trim().isEmpty()) {
+            return Collections.emptyList();
+        }
+        Path path = Path.of(artifactPath);
+        org.apache.flink.util.Preconditions.checkState(
+                Files.exists(path), "Python artifact path %s does not exist.", artifactPath);
+        String expectedSha256 = agentPlan.getConfig().getStr(PYTHON_ARTIFACT_SHA256_CONFIG, null);
+        if (expectedSha256 != null && !expectedSha256.trim().isEmpty()) {
+            String actual =
+                    org.apache.flink.agents.runtime.operator.coordinator.PlanIds.sha256HexOfFile(
+                            path);
+            org.apache.flink.util.Preconditions.checkState(
+                    actual.equalsIgnoreCase(expectedSha256.trim()),
+                    "Python artifact %s failed sha256 verification: expected %s but was %s.",
+                    artifactPath,
+                    expectedSha256,
+                    actual);
+        }
+        return Collections.singletonList(path.toString());
+    }
+
+    /** Path-only runtime layer of the plan ({@code dynamic-plan.python-runtime.path}). */
+    private List<String> runtimeRoots(AgentPlan agentPlan) {
+        String runtimePath = agentPlan.getConfig().getStr(PYTHON_RUNTIME_PATH_CONFIG, null);
+        if (runtimePath == null || runtimePath.trim().isEmpty()) {
+            return Collections.emptyList();
+        }
+        Path path = Path.of(runtimePath);
+        org.apache.flink.util.Preconditions.checkState(
+                Files.exists(path), "Python runtime path %s does not exist.", runtimePath);
+        return Collections.singletonList(path.toString());
+    }
+
+    private PythonInterpreter createPythonInterpreter() throws Exception {
         ensurePythonEnvironment();
         EmbeddedPythonEnvironment env = pythonEnvironmentManager.createEnvironment();
         PythonInterpreterConfig baseConfig = env.getConfig();
         PythonInterpreterConfig.PythonInterpreterConfigBuilder builder =
                 PythonInterpreterConfig.newBuilder().setExcType(baseConfig.getExecType());
-
-        String runtimePath = agentPlan.getConfig().getStr(PYTHON_RUNTIME_PATH_CONFIG, null);
-        if (runtimePath != null && !runtimePath.trim().isEmpty()) {
-            Path path = Path.of(runtimePath);
-            org.apache.flink.util.Preconditions.checkState(
-                    Files.exists(path), "Python runtime path %s does not exist.", runtimePath);
-            builder.addPythonPaths(path.toString());
-        }
-
-        String artifactPath = agentPlan.getConfig().getStr(PYTHON_ARTIFACT_PATH_CONFIG, null);
-        if (artifactPath != null && !artifactPath.trim().isEmpty()) {
-            Path path = Path.of(artifactPath);
-            org.apache.flink.util.Preconditions.checkState(
-                    Files.exists(path), "Python artifact path %s does not exist.", artifactPath);
-            String expectedSha256 =
-                    agentPlan.getConfig().getStr(PYTHON_ARTIFACT_SHA256_CONFIG, null);
-            if (expectedSha256 != null && !expectedSha256.trim().isEmpty()) {
-                String actual =
-                        org.apache.flink.agents.runtime.operator.coordinator.PlanIds
-                                .sha256HexOfFile(path);
-                org.apache.flink.util.Preconditions.checkState(
-                        actual.equalsIgnoreCase(expectedSha256.trim()),
-                        "Python artifact %s failed sha256 verification: expected %s but was %s.",
-                        artifactPath,
-                        expectedSha256,
-                        actual);
-            }
-            builder.addPythonPaths(path.toString());
-        }
 
         builder.addPythonPaths(baseConfig.getPaths());
         if (baseConfig.getPythonHome() != null) {
@@ -388,7 +504,6 @@ class PythonBridgeManager implements AutoCloseable {
     }
 
     private PythonResourceAdapterImpl initPythonResourceAdapter(
-            AgentPlan agentPlan,
             ResourceCache resourceCache,
             JavaResourceAdapter javaResourceAdapter,
             PythonInterpreter interpreter)
@@ -397,8 +512,7 @@ class PythonBridgeManager implements AutoCloseable {
                 new PythonResourceAdapterImpl(
                         resourceCache.getResourceContext(), interpreter, javaResourceAdapter);
         pythonResourceAdapter.open();
-        PythonMCPResourceDiscovery.discoverPythonMCPResources(
-                agentPlan.getResourceProviders(), pythonResourceAdapter, resourceCache);
+        // MCP discovery is deliberately NOT run here — see runDeferredResourceDiscovery.
         return pythonResourceAdapter;
     }
 
@@ -495,6 +609,12 @@ class PythonBridgeManager implements AutoCloseable {
         private final JavaResourceAdapter javaResourceAdapter;
         private final Mem0LongTermMemory longTermMemory;
         private final PythonInterpreter pythonInterpreter;
+        private final AgentPlan agentPlan;
+        private final ResourceCache resourceCache;
+        private final List<String> artifactRoots;
+        private final List<String> runtimeRoots;
+        private final String functionScope;
+        private boolean mcpDiscovered;
 
         private PlanPythonRuntime(
                 PythonActionExecutor pythonActionExecutor,
@@ -502,13 +622,23 @@ class PythonBridgeManager implements AutoCloseable {
                 PythonResourceAdapterImpl pythonResourceAdapter,
                 JavaResourceAdapter javaResourceAdapter,
                 Mem0LongTermMemory longTermMemory,
-                PythonInterpreter pythonInterpreter) {
+                PythonInterpreter pythonInterpreter,
+                AgentPlan agentPlan,
+                ResourceCache resourceCache,
+                List<String> artifactRoots,
+                List<String> runtimeRoots,
+                String functionScope) {
             this.pythonActionExecutor = pythonActionExecutor;
             this.pythonRunnerContext = pythonRunnerContext;
             this.pythonResourceAdapter = pythonResourceAdapter;
             this.javaResourceAdapter = javaResourceAdapter;
             this.longTermMemory = longTermMemory;
             this.pythonInterpreter = pythonInterpreter;
+            this.agentPlan = agentPlan;
+            this.resourceCache = resourceCache;
+            this.artifactRoots = artifactRoots;
+            this.runtimeRoots = runtimeRoots;
+            this.functionScope = functionScope;
         }
 
         @Override

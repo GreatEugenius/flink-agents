@@ -19,9 +19,8 @@
 import importlib
 import inspect
 import logging
-import sys
 from abc import ABC, abstractmethod
-from typing import Any, Callable, Dict, List, Optional, Tuple, get_type_hints
+from typing import Any, Callable, Dict, List, Tuple, get_type_hints
 
 from pydantic import BaseModel, PrivateAttr, model_serializer
 
@@ -102,11 +101,20 @@ def _is_function_cacheable(func: Callable) -> bool:
     return True
 
 
-def _drop_loaded_module(module: str) -> None:
-    """Force the next import to resolve the module from the current sys.path."""
-    for loaded_name in list(sys.modules):
-        if loaded_name == module or loaded_name.startswith(module + "."):
-            del sys.modules[loaded_name]
+def evict_python_function_scope(scope: str) -> int:
+    """Drop cached PythonFunction entries belonging to a retired runtime scope.
+
+    Module eviction itself is handled by
+    :mod:`flink_agents.runtime.plan_artifact` at the plan switch point; this
+    only releases the function objects that kept the retired plan's modules
+    alive through the cache.
+    """
+    removed = 0
+    for cache_key in list(_PYTHON_FUNCTION_CACHE):
+        if len(cache_key) == 3 and cache_key[0] == scope:
+            del _PYTHON_FUNCTION_CACHE[cache_key]
+            removed += 1
+    return removed
 
 
 class Function(BaseModel, ABC):
@@ -349,23 +357,24 @@ def call_python_function(*call_args: Tuple[Any, ...]) -> Any:
         The result of calling the function with the provided arguments.
     """
     if len(call_args) == 3:
-        scope: Optional[str] = None
         module, qualname, func_args = call_args
         cache_key = (module, qualname)
     elif len(call_args) == 4:
         scope, module, qualname, func_args = call_args
         cache_key = (scope, module, qualname)
     else:
-        raise TypeError(
+        msg = (
             "call_python_function expects (module, qualname, args) or "
             "(scope, module, qualname, args)"
         )
+        raise TypeError(msg)
 
     python_func = None
 
     if cache_key not in _PYTHON_FUNCTION_CACHE:
-        if scope is not None:
-            _drop_loaded_module(module)
+        # Module-world consistency across plan switches is guaranteed by
+        # plan_artifact.activate_plan_artifact at the barrier switch point;
+        # here a plain import always resolves against the active overlay.
         python_func = PythonFunction(module=module, qualname=qualname)
         if python_func.is_cacheable():
             _PYTHON_FUNCTION_CACHE[cache_key] = python_func

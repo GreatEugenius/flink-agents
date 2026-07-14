@@ -536,7 +536,11 @@ public class ActionExecutionOperator<IN, OUT> extends AbstractStreamOperator<OUT
         if (planManager.hasPending()) {
             waitInFlightEventsFinished();
             String replacedPlanKey = planManager.switchToPending();
-            pythonBridge.releasePlan(replacedPlanKey);
+            // The drain guarantees no Python code of the replaced plan is running, so this is
+            // the one safe point to swap the shared Python module world: evict the retired
+            // artifact's modules (and base-layer modules the new artifact shadows), swap
+            // sys.path overlays, run deferred resource discovery, then close the old runtime.
+            pythonBridge.activatePlan(planManager.currentPlanKey(), replacedPlanKey);
             durableExecManager.setActivePlanVersion(planManager.currentPlanVersion());
         }
         super.prepareSnapshotPreBarrier(checkpointId);

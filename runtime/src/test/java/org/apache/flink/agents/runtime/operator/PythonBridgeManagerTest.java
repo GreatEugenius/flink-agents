@@ -58,6 +58,11 @@ class PythonBridgeManagerTest {
             assertThat(bridge.isInitialized()).isFalse();
             assertThat(bridge.getPythonActionExecutor()).isNull();
             assertThat(bridge.getPythonRunnerContext()).isNull();
+
+            // Switching between plans that never built a Python runtime must be a no-op
+            // (the operator calls activatePlan unconditionally at the barrier switch point).
+            bridge.activatePlan("plan-1", "plan-0");
+            assertThat(bridge.getPythonActionExecutor("plan-1")).isNull();
         }
     }
 }

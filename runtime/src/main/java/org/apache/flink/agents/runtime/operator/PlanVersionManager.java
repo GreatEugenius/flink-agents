@@ -55,12 +55,12 @@ import static org.apache.flink.util.Preconditions.checkState;
  *
  * <p>Lifecycle of an update: {@link #preparePending} runs at event arrival on the mailbox thread —
  * it verifies the wire signature, deserializes the plan, pins the job-level configuration of the
- * bootstrap plan (only the Java artifact path and sha256 keys are plan-scoped), builds the
- * plan-scoped artifact classloader and proves every Java action loadable through it. Python runtime
- * construction is deliberately deferred until the activation barrier. Newest wins: preparing a
- * newer update discards an unswitched older pending. {@link #switchToPending} runs at {@code
- * prepareSnapshotPreBarrier} after the operator drained its in-flight chains and activated the
- * pending runtime.
+ * bootstrap plan (only the four Java/Python artifact path and sha256 keys are plan-scoped), builds
+ * the plan-scoped artifact classloader and proves every Java action loadable through it. Python
+ * runtime construction is deliberately deferred until the activation barrier because it mutates
+ * process-global CPython import state. Newest wins: preparing a newer update discards an unswitched
+ * older pending. {@link #switchToPending} runs at {@code prepareSnapshotPreBarrier} after the
+ * operator drained its in-flight chains and activated the pending runtime.
  *
  * <p>Checkpointed fact: the current {@code (version, canonicalPlanJson)} as union operator state,
  * one record per subtask. On restore every subtask picks the record with the highest planVersion,
@@ -78,7 +78,11 @@ class PlanVersionManager {
 
     /** Update-carried config keys honored during the bootstrap-config merge. */
     private static final Set<String> PLAN_SCOPED_CONFIG_KEYS =
-            Set.of(JAVA_ARTIFACT_PATH_CONFIG, JAVA_ARTIFACT_SHA256_CONFIG);
+            Set.of(
+                    JAVA_ARTIFACT_PATH_CONFIG,
+                    JAVA_ARTIFACT_SHA256_CONFIG,
+                    PythonBridgeManager.PYTHON_ARTIFACT_PATH_CONFIG,
+                    PythonBridgeManager.PYTHON_ARTIFACT_SHA256_CONFIG);
 
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
@@ -298,7 +302,7 @@ class PlanVersionManager {
     /**
      * Job-level configuration is pinned at submission: the effective plan keeps the update's
      * actions/routing/resources but carries the bootstrap {@code AgentConfiguration}, except for
-     * the update's Java artifact path and sha256 keys, which are plan-scoped by nature.
+     * the update's four Java/Python artifact path and sha256 keys, which are plan-scoped by nature.
      */
     private AgentPlan withBootstrapConfig(AgentPlan received) {
         Map<String, Object> merged = new HashMap<>(bootstrapPlan.getConfig().getConfData());

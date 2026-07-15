@@ -23,6 +23,7 @@ import org.apache.flink.agents.runtime.operator.coordinator.PlanUpdateCoordinato
 import org.apache.flink.runtime.jobgraph.OperatorID;
 import org.apache.flink.runtime.operators.coordination.OperatorCoordinator;
 import org.apache.flink.streaming.api.operators.AbstractStreamOperatorFactory;
+import org.apache.flink.streaming.api.operators.ChainingStrategy;
 import org.apache.flink.streaming.api.operators.CoordinatedOperatorFactory;
 import org.apache.flink.streaming.api.operators.OneInputStreamOperatorFactory;
 import org.apache.flink.streaming.api.operators.StreamOperator;
@@ -50,6 +51,10 @@ public class CoordinatedActionExecutionOperatorFactory<IN, OUT>
         this.agentPlan = agentPlan;
         this.inputIsJava = inputIsJava;
         this.actionStateStore = actionStateStore;
+        // Dynamic Python reload mutates process-global CPython state. Keep this operator in its
+        // own task; CompileUtils also assigns a dedicated slot-sharing group. Together with the
+        // documented one-slot-per-TaskManager requirement, one AEO owns one JVM/CPython process.
+        this.chainingStrategy = ChainingStrategy.NEVER;
     }
 
     @Override

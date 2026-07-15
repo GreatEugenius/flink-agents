@@ -22,6 +22,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.flink.agents.plan.AgentPlan;
 import org.apache.flink.agents.runtime.operator.CoordinatedActionExecutionOperatorFactory;
+import org.apache.flink.annotation.VisibleForTesting;
 import org.apache.flink.api.common.typeinfo.TypeInformation;
 import org.apache.flink.api.java.functions.KeySelector;
 import org.apache.flink.streaming.api.datastream.DataStream;
@@ -80,6 +81,10 @@ public class CompileUtils {
     /** Stable uid of the coordinated agent operator. */
     public static final String COORDINATED_OPERATOR_UID = "flink-agents-coordinated-operator";
 
+    /** Dedicated slot-sharing group required by process-wide Python artifact reload. */
+    public static final String COORDINATED_OPERATOR_SLOT_SHARING_GROUP =
+            "flink-agents-action-execution";
+
     /**
      * The only wiring: the agent operator is always coordinated, so every job can receive plan
      * updates as OperatorEvents from the JM-side coordinator without opting in. Addressed by the
@@ -100,6 +105,14 @@ public class CompileUtils {
                                 new CoordinatedActionExecutionOperatorFactory<>(
                                         agentPlan, inputIsJava))
                         .uid(COORDINATED_OPERATOR_UID)
+                        .slotSharingGroup(COORDINATED_OPERATOR_SLOT_SHARING_GROUP)
                         .setParallelism(keyedInputStream.getParallelism());
+    }
+
+    @VisibleForTesting
+    public static <IN, K> DataStream<Object> connectToAgentWithCoordinator(
+            KeyedStream<IN, K> keyedInputStream, AgentPlan agentPlan) {
+        return coordinatedConnect(
+                keyedInputStream, agentPlan, TypeInformation.of(Object.class), true);
     }
 }

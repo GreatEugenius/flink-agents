@@ -56,6 +56,8 @@ import java.util.Map;
 import java.util.jar.JarEntry;
 import java.util.jar.JarOutputStream;
 import java.util.stream.Collectors;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipOutputStream;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -379,6 +381,81 @@ public class DynamicPlanSwitchOperatorTest {
     }
 
     @Test
+    void pythonArtifactIsPreparedOnlyAfterDrainAndReloadsItsDependencyGraph(@TempDir Path tempDir)
+            throws Exception {
+        Path artifactV1 = createPythonPackageArtifact(tempDir.resolve("v1"), 100L);
+        Path artifactV2 = createPythonPackageArtifact(tempDir.resolve("v2"), 200L);
+
+        try (KeyedOneInputStreamOperatorTestHarness<Long, Long, Object> harness =
+                pythonArtifactHarness(artifactV1)) {
+            harness.open();
+            ActionExecutionOperator<Long, Object> op = op(harness);
+            PythonBridgeManager bridge = pythonBridge(op);
+            PythonActionExecutor oldExecutor = bridge.getPythonActionExecutor();
+
+            op.handleOperatorEvent(planUpdate(1L, json(pythonArtifactPlan(artifactV2))));
+
+            // Receiving an update must not mutate the process-global CPython state: V1 still
+            // serves records until the activation barrier.
+            assertThat(bridge.getPythonActionExecutor()).isSameAs(oldExecutor);
+            harness.processElement(new StreamRecord<>(1L));
+            op.waitInFlightEventsFinished();
+            assertThat(outputs(harness)).containsExactly("101");
+
+            checkpoint(harness, 101L);
+            assertThat(op.getCurrentPlanVersionForTesting()).isEqualTo(1L);
+            assertThat(bridge.getPythonActionExecutor()).isNotSameAs(oldExecutor);
+
+            harness.processElement(new StreamRecord<>(1L));
+            op.waitInFlightEventsFinished();
+            // Both app.agent and its already-imported dependency must now resolve from V2.
+            assertThat(outputs(harness)).containsExactly("101", "201");
+        }
+    }
+
+    @Test
+    void missingPythonActionEntryFailsAtTheActivationBarrier(@TempDir Path tempDir)
+            throws Exception {
+        Path artifactV1 = createPythonPackageArtifact(tempDir.resolve("v1"), 100L);
+        Path artifactV2 = createPythonPackageArtifact(tempDir.resolve("v2"), 200L);
+
+        try (KeyedOneInputStreamOperatorTestHarness<Long, Long, Object> harness =
+                pythonArtifactHarness(artifactV1)) {
+            harness.open();
+            ActionExecutionOperator<Long, Object> op = op(harness);
+
+            op.handleOperatorEvent(
+                    planUpdate(1L, json(pythonArtifactPlan(artifactV2, "app.missing_action"))));
+            assertThat(op.hasPendingPlanForTesting()).isTrue();
+
+            assertThatThrownBy(() -> checkpoint(harness, 101L))
+                    .hasMessageContaining("Could not resolve Python action")
+                    .hasMessageContaining("app.missing_action.handle");
+        }
+    }
+
+    @Test
+    void pythonArtifactTamperedAfterPrepareFailsAtTheActivationBarrier(@TempDir Path tempDir)
+            throws Exception {
+        Path artifactV1 = createPythonPackageArtifact(tempDir.resolve("v1"), 100L);
+        Path artifactV2 = createPythonPackageArtifact(tempDir.resolve("v2"), 200L);
+
+        try (KeyedOneInputStreamOperatorTestHarness<Long, Long, Object> harness =
+                pythonArtifactHarness(artifactV1)) {
+            harness.open();
+            ActionExecutionOperator<Long, Object> op = op(harness);
+
+            op.handleOperatorEvent(planUpdate(1L, json(pythonArtifactPlan(artifactV2))));
+            assertThat(op.hasPendingPlanForTesting()).isTrue();
+            Files.writeString(artifactV2, "tampered after prepare");
+
+            assertThatThrownBy(() -> checkpoint(harness, 101L))
+                    .hasMessageContaining("failed sha256 verification")
+                    .hasMessageContaining(artifactV2.toString());
+        }
+    }
+
+    @Test
     void existingPythonActionCanSwitchWithoutAnArtifact() throws Exception {
         try (KeyedOneInputStreamOperatorTestHarness<Long, Long, Object> harness =
                 harness(pythonPlan("old_action"))) {
@@ -479,6 +556,11 @@ public class DynamicPlanSwitchOperatorTest {
                 new ActionExecutionOperatorFactory<>(plan, true),
                 (KeySelector<Long, Long>) value -> value,
                 TypeInformation.of(Long.class));
+    }
+
+    private static KeyedOneInputStreamOperatorTestHarness<Long, Long, Object> pythonArtifactHarness(
+            Path artifactPath) throws Exception {
+        return harness(pythonArtifactPlan(artifactPath));
     }
 
     private static KeyedOneInputStreamOperatorTestHarness<Long, Row, Object> pythonWireHarness()
@@ -593,6 +675,67 @@ public class DynamicPlanSwitchOperatorTest {
                 Map.of(InputEvent.EVENT_TYPE, List.of(action)),
                 new HashMap<>(),
                 config);
+    }
+
+    private static AgentPlan pythonArtifactPlan(Path artifactPath) throws Exception {
+        return pythonArtifactPlan(artifactPath, "app.agent");
+    }
+
+    private static AgentPlan pythonArtifactPlan(Path artifactPath, String module) throws Exception {
+        Action action =
+                new Action(
+                        "pythonAction",
+                        new PythonFunction(module, "handle"),
+                        Collections.singletonList(InputEvent.EVENT_TYPE));
+        AgentConfiguration config = new AgentConfiguration();
+        config.setInt("num-async-threads", 1);
+        config.setStr(PythonBridgeManager.PYTHON_ARTIFACT_PATH_CONFIG, artifactPath.toString());
+        config.setStr(
+                PythonBridgeManager.PYTHON_ARTIFACT_SHA256_CONFIG,
+                PlanIds.sha256HexOfFile(artifactPath));
+        config.setStr(
+                PythonBridgeManager.PYTHON_RUNTIME_PATH_CONFIG, pythonRuntimePath().toString());
+        return new AgentPlan(
+                Map.of(action.getName(), action),
+                Map.of(InputEvent.EVENT_TYPE, List.of(action)),
+                new HashMap<>(),
+                config);
+    }
+
+    private static Path createPythonPackageArtifact(Path directory, long addend) throws Exception {
+        Files.createDirectories(directory);
+        Path artifact = directory.resolve("app-" + addend + ".zip");
+        try (ZipOutputStream zip = new ZipOutputStream(Files.newOutputStream(artifact))) {
+            writeZipEntry(zip, "app/__init__.py", "");
+            writeZipEntry(zip, "app/utils/__init__.py", "");
+            writeZipEntry(zip, "app/utils/data_type.py", "ADDEND = " + addend + "\n");
+            writeZipEntry(
+                    zip,
+                    "app/agent.py",
+                    "from app.utils import data_type\n"
+                            + "from flink_agents.api.events.event import Event, InputEvent, OutputEvent\n"
+                            + "from flink_agents.api.runner_context import RunnerContext\n\n"
+                            + "def handle(event: Event, ctx: RunnerContext):\n"
+                            + "    value = InputEvent.from_event(event).input + data_type.ADDEND\n"
+                            + "    ctx.send_event(OutputEvent(output=str(value)))\n");
+        }
+        return artifact;
+    }
+
+    private static void writeZipEntry(ZipOutputStream zip, String name, String contents)
+            throws Exception {
+        zip.putNextEntry(new ZipEntry(name));
+        zip.write(contents.getBytes(StandardCharsets.UTF_8));
+        zip.closeEntry();
+    }
+
+    private static Path pythonRuntimePath() {
+        Path workingDirectory = Path.of("").toAbsolutePath().normalize();
+        Path fromRepositoryRoot = workingDirectory.resolve("python");
+        if (Files.exists(fromRepositoryRoot)) {
+            return fromRepositoryRoot;
+        }
+        return workingDirectory.resolve("..").resolve("python").normalize();
     }
 
     private static AgentPlan javaArtifactPlan(Path artifactPath) throws Exception {

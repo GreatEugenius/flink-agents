@@ -39,11 +39,17 @@ import org.apache.flink.python.env.PythonDependencyInfo;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import pemja.core.PythonInterpreter;
+import pemja.core.PythonInterpreterConfig;
 import pemja.core.object.PyObject;
 
 import javax.annotation.Nullable;
 
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.HashMap;
+import java.util.Locale;
+import java.util.Objects;
+import java.util.zip.ZipFile;
 
 import static org.apache.flink.agents.plan.actions.Utils.requiredVersions;
 import static org.apache.flink.agents.plan.actions.Utils.supportAsync;
@@ -64,10 +70,12 @@ import static org.apache.flink.agents.plan.actions.Utils.supportAsync;
  *
  * <p>Lifecycle: instantiated by the operator's {@code open()} (lazy — not in the operator
  * constructor), then initialized via {@link #open}. At most one plan runtime is executable in the
- * process: after the activation barrier drains the old plan, {@link #activatePlan} closes its
- * interpreter and constructs the replacement. A Java-only plan still has a runtime when the
- * surrounding pipeline uses Python wire encoding, because input/output conversion runs in Python.
- * {@link #close()} closes the active interpreter and the shared environment manager.
+ * process: an update only receives static metadata validation on event arrival; after the
+ * activation barrier drains the old plan, {@link #activatePlan} quiesces and retires its artifact,
+ * closes its interpreter, and constructs the replacement. A Java-only plan still has a runtime when
+ * the surrounding pipeline uses Python wire encoding, because input/output conversion runs in
+ * Python. {@link #close()} retires the active artifact before closing its interpreter and the
+ * shared environment manager.
  *
  * <p>Design constraint: package-private; no manager-to-manager held references. Other managers
  * receive what they need (e.g. the Python runner context, the action executor) via method
@@ -76,6 +84,13 @@ import static org.apache.flink.agents.plan.actions.Utils.supportAsync;
 class PythonBridgeManager implements AutoCloseable {
 
     private static final Logger LOG = LoggerFactory.getLogger(PythonBridgeManager.class);
+
+    static final String PYTHON_ARTIFACT_PATH_CONFIG = "dynamic-plan.python-artifact.path";
+    static final String PYTHON_ARTIFACT_SHA256_CONFIG = "dynamic-plan.python-artifact.sha256";
+    static final String PYTHON_RUNTIME_PATH_CONFIG = "dynamic-plan.python-runtime.path";
+
+    private static final String PLAN_FUNCTION_MODULE = "__fa_plan_function";
+    private static final String SWITCH_PYTHON_ARTIFACT = "switch_python_artifact";
 
     private PythonEnvironmentManager pythonEnvironmentManager;
     @Nullable private PlanPythonRuntime activeRuntime;
@@ -146,6 +161,7 @@ class PythonBridgeManager implements AutoCloseable {
         this.jobIdentifier = jobIdentifier;
         this.userCodeClassLoader = userCodeClassLoader;
 
+        validatePythonPlanMetadata(agentPlan);
         activeRuntime = createPlanRuntime(agentPlan, resourceCache);
     }
 
@@ -160,9 +176,15 @@ class PythonBridgeManager implements AutoCloseable {
             return null;
         }
 
-        PythonInterpreter interpreter = createPythonInterpreter();
+        PythonInterpreter interpreter = createPythonInterpreter(agentPlan);
         PythonActionExecutor pythonActionExecutor = null;
+        String artifactPath = pythonArtifactPath(agentPlan);
+        boolean artifactLifecycleInitialized = false;
         try {
+            initializePlanFunctionModule(interpreter);
+            artifactLifecycleInitialized = true;
+            switchPythonArtifact(interpreter, artifactPath);
+
             PythonRunnerContextImpl pythonRunnerContext =
                     new PythonRunnerContextImpl(
                             metricGroup,
@@ -209,6 +231,13 @@ class PythonBridgeManager implements AutoCloseable {
                     creationFailure.addSuppressed(closeFailure);
                 }
             }
+            if (artifactLifecycleInitialized) {
+                try {
+                    switchPythonArtifact(interpreter, null);
+                } catch (Exception cleanupFailure) {
+                    creationFailure.addSuppressed(cleanupFailure);
+                }
+            }
             try {
                 interpreter.close();
             } catch (Exception closeFailure) {
@@ -218,10 +247,153 @@ class PythonBridgeManager implements AutoCloseable {
         }
     }
 
-    private PythonInterpreter createPythonInterpreter() throws Exception {
+    /** Validates plan-scoped Python paths without starting or mutating CPython. */
+    void validatePythonPlanMetadata(AgentPlan agentPlan) throws Exception {
+        if (!needsPythonRuntime(agentPlan)) {
+            return;
+        }
+
+        String runtimePath = normalizedConfigValue(agentPlan, PYTHON_RUNTIME_PATH_CONFIG);
+        if (runtimePath != null) {
+            org.apache.flink.util.Preconditions.checkState(
+                    Files.exists(Path.of(runtimePath)),
+                    "Python runtime path %s does not exist.",
+                    runtimePath);
+        }
+
+        String artifactPath = normalizedConfigValue(agentPlan, PYTHON_ARTIFACT_PATH_CONFIG);
+        String expectedSha256 = normalizedConfigValue(agentPlan, PYTHON_ARTIFACT_SHA256_CONFIG);
+        org.apache.flink.util.Preconditions.checkState(
+                (artifactPath == null) == (expectedSha256 == null),
+                "%s and %s must be configured together.",
+                PYTHON_ARTIFACT_PATH_CONFIG,
+                PYTHON_ARTIFACT_SHA256_CONFIG);
+        if (artifactPath == null) {
+            return;
+        }
+
+        Path path = Path.of(artifactPath);
+        org.apache.flink.util.Preconditions.checkState(
+                Files.isRegularFile(path),
+                "Python artifact path %s must be a regular file.",
+                artifactPath);
+        org.apache.flink.util.Preconditions.checkState(
+                expectedSha256.matches("(?i)[0-9a-f]{64}"),
+                "%s must contain exactly 64 hexadecimal characters.",
+                PYTHON_ARTIFACT_SHA256_CONFIG);
+        String actual =
+                org.apache.flink.agents.runtime.operator.coordinator.PlanIds.sha256HexOfFile(path);
+        org.apache.flink.util.Preconditions.checkState(
+                actual.equalsIgnoreCase(expectedSha256),
+                "Python artifact %s failed sha256 verification: expected %s but was %s.",
+                artifactPath,
+                expectedSha256,
+                actual);
+        try (ZipFile ignored = new ZipFile(path.toFile())) {
+            // Opening the archive is enough to reject malformed zip/whl files before CPython.
+        } catch (Exception e) {
+            throw new IllegalStateException(
+                    String.format(
+                            "Python artifact %s must be a valid zip or wheel archive.",
+                            artifactPath),
+                    e);
+        }
+    }
+
+    /** Validates process-wide reload boundaries for one running task. */
+    void validatePythonPlanTransition(AgentPlan currentPlan, AgentPlan newPlan) {
+        if (!needsPythonRuntime(currentPlan) && !needsPythonRuntime(newPlan)) {
+            return;
+        }
+
+        String currentRuntimePath =
+                normalizedConfiguredPath(currentPlan, PYTHON_RUNTIME_PATH_CONFIG);
+        String newRuntimePath = normalizedConfiguredPath(newPlan, PYTHON_RUNTIME_PATH_CONFIG);
+        org.apache.flink.util.Preconditions.checkState(
+                Objects.equals(currentRuntimePath, newRuntimePath),
+                "%s is job-level and cannot change while an AgentPlan job is running: %s -> %s.",
+                PYTHON_RUNTIME_PATH_CONFIG,
+                currentRuntimePath,
+                newRuntimePath);
+
+        String currentArtifactPath =
+                normalizedConfiguredPath(currentPlan, PYTHON_ARTIFACT_PATH_CONFIG);
+        String newArtifactPath = normalizedConfiguredPath(newPlan, PYTHON_ARTIFACT_PATH_CONFIG);
+        if (sameConfiguredPath(currentArtifactPath, newArtifactPath)) {
+            String currentSha = normalizedSha(currentPlan);
+            String newSha = normalizedSha(newPlan);
+            org.apache.flink.util.Preconditions.checkState(
+                    Objects.equals(currentSha, newSha),
+                    "%s is immutable; use a new path for a different digest: %s.",
+                    PYTHON_ARTIFACT_PATH_CONFIG,
+                    currentArtifactPath);
+        }
+    }
+
+    @Nullable
+    private static String normalizedConfiguredPath(AgentPlan plan, String key) {
+        String configured = normalizedConfigValue(plan, key);
+        if (configured == null) {
+            return null;
+        }
+        Path path = Path.of(configured);
+        try {
+            return path.toRealPath().toString();
+        } catch (Exception ignored) {
+            return path.toAbsolutePath().normalize().toString();
+        }
+    }
+
+    private static boolean sameConfiguredPath(
+            @Nullable String currentPath, @Nullable String newPath) {
+        if (currentPath == null || newPath == null) {
+            return false;
+        }
+        try {
+            return Files.isSameFile(Path.of(currentPath), Path.of(newPath));
+        } catch (Exception ignored) {
+            return currentPath.equals(newPath);
+        }
+    }
+
+    @Nullable
+    private static String normalizedSha(AgentPlan plan) {
+        String sha = normalizedConfigValue(plan, PYTHON_ARTIFACT_SHA256_CONFIG);
+        return sha == null ? null : sha.toLowerCase(Locale.ROOT);
+    }
+
+    @Nullable
+    private static String normalizedConfigValue(AgentPlan plan, String key) {
+        String configured = plan.getConfig().getStr(key, null);
+        return configured == null || configured.trim().isEmpty() ? null : configured.trim();
+    }
+
+    private PythonInterpreter createPythonInterpreter(AgentPlan agentPlan) throws Exception {
         ensurePythonEnvironment();
         EmbeddedPythonEnvironment env = pythonEnvironmentManager.createEnvironment();
-        return env.getInterpreter();
+        PythonInterpreterConfig baseConfig = env.getConfig();
+        PythonInterpreterConfig.PythonInterpreterConfigBuilder builder =
+                PythonInterpreterConfig.newBuilder().setExcType(baseConfig.getExecType());
+
+        String runtimePath = agentPlan.getConfig().getStr(PYTHON_RUNTIME_PATH_CONFIG, null);
+        if (runtimePath != null && !runtimePath.trim().isEmpty()) {
+            Path path = Path.of(runtimePath);
+            org.apache.flink.util.Preconditions.checkState(
+                    Files.exists(path), "Python runtime path %s does not exist.", runtimePath);
+            builder.addPythonPaths(path.toString());
+        }
+
+        builder.addPythonPaths(baseConfig.getPaths());
+        if (baseConfig.getPythonHome() != null) {
+            builder.setPythonHome(baseConfig.getPythonHome());
+        }
+        if (baseConfig.getWorkingDirectory() != null) {
+            builder.setWorkingDirectory(baseConfig.getWorkingDirectory());
+        }
+        if (baseConfig.getPythonExec() != null) {
+            builder.setPythonExec(baseConfig.getPythonExec());
+        }
+        return new PythonInterpreter(builder.build());
     }
 
     private void ensurePythonEnvironment() throws Exception {
@@ -348,24 +520,40 @@ class PythonBridgeManager implements AutoCloseable {
         }
     }
 
+    private static void initializePlanFunctionModule(PythonInterpreter interpreter) {
+        interpreter.exec(
+                "from flink_agents.plan import function as " + PLAN_FUNCTION_MODULE + "\n");
+    }
+
+    private static void switchPythonArtifact(
+            PythonInterpreter interpreter, @Nullable String artifactPath) {
+        interpreter.invokeMethod(PLAN_FUNCTION_MODULE, SWITCH_PYTHON_ARTIFACT, artifactPath);
+    }
+
     /**
-     * Rebuilds the Python-visible runtime while the checkpoint barrier still blocks input. The old
-     * runtime is quiesced and closed before the replacement is constructed and its declared Python
-     * action entries are resolved.
+     * Performs the Python-visible switch while the checkpoint barrier still blocks input. The old
+     * runtime is quiesced first, then its entire artifact-owned module graph is removed while its
+     * interpreter remains usable as the cleanup handle. Only after that interpreter is closed is
+     * the new artifact mounted and its declared Python action entries resolved.
      *
-     * <p>Any failure escapes the barrier. There is no local rollback after the old runtime has been
-     * closed; the task must recover from the previous completed checkpoint.
+     * <p>Any failure escapes the barrier. There is no local rollback after the old module graph has
+     * been retired; the task must recover from the previous completed checkpoint.
      */
     void activatePlan(AgentPlan newPlan, ResourceCache newResourceCache) throws Exception {
         closeActiveRuntime();
         activeRuntime = createPlanRuntime(newPlan, newResourceCache);
     }
 
-    /** Stops old-plan async work before its interpreter and Java-side resources are released. */
+    /** Stops old-plan async work while retaining its interpreter as the cleanup handle. */
     void quiescePlan() throws Exception {
         if (activeRuntime != null) {
             activeRuntime.quiesce();
         }
+    }
+
+    @Nullable
+    private static String pythonArtifactPath(AgentPlan plan) {
+        return normalizedConfiguredPath(plan, PYTHON_ARTIFACT_PATH_CONFIG);
     }
 
     private PythonResourceAdapterImpl initPythonResourceAdapter(
@@ -491,6 +679,15 @@ class PythonBridgeManager implements AutoCloseable {
                 quiesce();
             } catch (Exception e) {
                 firstException = e;
+            }
+            try {
+                switchPythonArtifact(pythonInterpreter, null);
+            } catch (Exception e) {
+                if (firstException == null) {
+                    firstException = e;
+                } else {
+                    firstException.addSuppressed(e);
+                }
             }
             if (pythonInterpreter != null) {
                 try {

@@ -86,7 +86,7 @@ public class ActionExecutionOperator<IN, OUT> extends AbstractStreamOperator<OUT
     private final AgentPlan agentPlan;
 
     // Single plan-access entry: the live plan, the pending update waiting for the next checkpoint
-    // barrier, and their plan-scoped resource caches.
+    // barrier, and their plan-scoped resources (classloader, resource cache).
     private transient PlanVersionManager planManager;
 
     private transient PythonBridgeManager pythonBridge;
@@ -172,10 +172,10 @@ public class ActionExecutionOperator<IN, OUT> extends AbstractStreamOperator<OUT
         // init PythonActionExecutor and PythonResourceAdapter for the effective plan.
         // ResourceCache (owned per plan by the PlanVersionManager) constructs its own long-lived
         // ResourceContextImpl internally; on close() the cache cascades close to it and to the
-        // cached SkillManager, covering Flink failover when the JVM does not exit. The Flink
-        // user-code classloader is threaded down so classpath: skill sources resolve against the
-        // user JAR regardless of which thread (mailbox / Python interpreter / async pool) later
-        // triggers the lazy SkillManager construction.
+        // cached SkillManager, covering Flink failover when the JVM does not exit. The plan
+        // classloader is threaded down so classpath: skill sources resolve against the plan's
+        // artifact (or the Flink user JAR) regardless of which thread (mailbox / Python
+        // interpreter / async pool) later triggers the lazy SkillManager construction.
         pythonBridge = new PythonBridgeManager(!inputIsJava);
         pythonBridge.open(
                 effectivePlan,
@@ -378,8 +378,7 @@ public class ActionExecutionOperator<IN, OUT> extends AbstractStreamOperator<OUT
 
             ActionTask.ActionTaskResult actionTaskResult =
                     actionTask.invoke(
-                            getRuntimeContext().getUserCodeClassLoader(),
-                            currentPythonActionExecutor());
+                            planManager.currentClassLoader(), currentPythonActionExecutor());
 
             // We remove the contexts from the map after the task is processed. They will be added
             // back later if the action task has a generated action task, meaning it is not
@@ -577,6 +576,11 @@ public class ActionExecutionOperator<IN, OUT> extends AbstractStreamOperator<OUT
 
             AgentPlan nextPlan = planManager.pendingPlan();
 
+            // Re-check the immutable Java artifact after drain and before dismantling V1. The
+            // deployment contract requires content-addressed artifacts to remain immutable for
+            // the rest of this barrier operation.
+            planManager.validatePendingJavaArtifact();
+
             // Runner contexts and ResourceCache may hold Python references. Quiesce the Python
             // executor, release the Java context, close Java-side resources while the old
             // interpreter is still alive, and only then construct the next runtime. No input can
@@ -595,11 +599,11 @@ public class ActionExecutionOperator<IN, OUT> extends AbstractStreamOperator<OUT
 
     /**
      * Receives a plan update from the coordinator (mailbox thread). This path performs only
-     * process-independent preparation: wire/JSON validation, Java classloading and resource
-     * construction. It deliberately does not create a Python interpreter; that happens after the
-     * next barrier drains the old plan. Newest wins: a newer update replaces an unswitched pending
-     * one. Duplicates and stale backfills are no-ops. A rejected update never disturbs the current
-     * plan.
+     * process-independent preparation: wire/JSON validation, Java artifact digest checks,
+     * classloading and resource construction. It deliberately does not create a Python interpreter;
+     * that happens after the next barrier drains the old plan. Newest wins: a newer update replaces
+     * an unswitched pending one. Duplicates and stale backfills are no-ops. A rejected update never
+     * disturbs the current plan.
      */
     @Override
     public void handleOperatorEvent(OperatorEvent evt) {

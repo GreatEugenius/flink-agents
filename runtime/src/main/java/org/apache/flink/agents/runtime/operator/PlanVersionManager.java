@@ -33,9 +33,17 @@ import org.slf4j.LoggerFactory;
 
 import javax.annotation.Nullable;
 
+import java.io.Closeable;
 import java.io.Serializable;
+import java.net.URL;
+import java.net.URLClassLoader;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.HashMap;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
 import java.util.function.Supplier;
 
 import static org.apache.flink.util.Preconditions.checkState;
@@ -47,11 +55,12 @@ import static org.apache.flink.util.Preconditions.checkState;
  *
  * <p>Lifecycle of an update: {@link #preparePending} runs at event arrival on the mailbox thread —
  * it verifies the wire signature, deserializes the plan, pins the job-level configuration of the
- * bootstrap plan, and proves every Java action loadable through the job's user-code classloader.
- * Python runtime construction is deliberately deferred until the activation barrier. Newest wins:
- * preparing a newer update discards an unswitched older pending. {@link #switchToPending} runs at
- * {@code prepareSnapshotPreBarrier} after the operator drained its in-flight chains and activated
- * the pending runtime.
+ * bootstrap plan (only the Java artifact path and sha256 keys are plan-scoped), builds the
+ * plan-scoped artifact classloader and proves every Java action loadable through it. Python runtime
+ * construction is deliberately deferred until the activation barrier. Newest wins: preparing a
+ * newer update discards an unswitched older pending. {@link #switchToPending} runs at {@code
+ * prepareSnapshotPreBarrier} after the operator drained its in-flight chains and activated the
+ * pending runtime.
  *
  * <p>Checkpointed fact: the current {@code (version, canonicalPlanJson)} as union operator state,
  * one record per subtask. On restore every subtask picks the record with the highest planVersion,
@@ -63,6 +72,13 @@ import static org.apache.flink.util.Preconditions.checkState;
 class PlanVersionManager {
 
     private static final Logger LOG = LoggerFactory.getLogger(PlanVersionManager.class);
+
+    static final String JAVA_ARTIFACT_PATH_CONFIG = "dynamic-plan.java-artifact.path";
+    static final String JAVA_ARTIFACT_SHA256_CONFIG = "dynamic-plan.java-artifact.sha256";
+
+    /** Update-carried config keys honored during the bootstrap-config merge. */
+    private static final Set<String> PLAN_SCOPED_CONFIG_KEYS =
+            Set.of(JAVA_ARTIFACT_PATH_CONFIG, JAVA_ARTIFACT_SHA256_CONFIG);
 
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
@@ -123,11 +139,16 @@ class PlanVersionManager {
 
     /**
      * Late wiring of the user-code classloader (available only from {@code open()}). A restored
-     * dynamic plan re-proves that its Java actions are still loadable before it can run.
+     * dynamic plan re-creates its artifact classloader here and re-proves that its Java action
+     * classes are loadable — without its artifact the plan cannot run, so this fails fast.
      */
     void open(Supplier<ClassLoader> userCodeClassLoader) throws Exception {
         this.userCodeClassLoader = userCodeClassLoader;
-        validateJavaActionsExecutable(current.plan, userCodeClassLoader.get());
+        if (current.version > 0 && current.classLoader == null) {
+            current.classLoader = createArtifactClassLoader(current.plan);
+        }
+        validateJavaActionsExecutable(
+                current.plan, current.classLoaderOrDefault(userCodeClassLoader.get()));
     }
 
     long currentPlanVersion() {
@@ -139,14 +160,13 @@ class PlanVersionManager {
     }
 
     ClassLoader currentClassLoader() {
-        return userCodeClassLoader.get();
+        return current.classLoaderOrDefault(userCodeClassLoader.get());
     }
 
     ResourceCache currentResourceCache() {
         if (current.resourceCache == null) {
             current.resourceCache =
-                    new ResourceCache(
-                            current.plan.getResourceProviders(), userCodeClassLoader.get());
+                    new ResourceCache(current.plan.getResourceProviders(), currentClassLoader());
         }
         return current.resourceCache;
     }
@@ -188,17 +208,29 @@ class PlanVersionManager {
                 planId);
         AgentPlan received = OBJECT_MAPPER.readValue(canonicalPlanJson, AgentPlan.class);
         AgentPlan effective = withBootstrapConfig(received);
+        validateJavaArtifactTransition(current.plan, effective);
 
         PlanSlot prepared = new PlanSlot(version, canonicalJsonOf(effective), effective);
         try {
-            validateJavaActionsExecutable(effective, userCodeClassLoader.get());
+            prepared.classLoader = createArtifactClassLoader(effective);
+            validateJavaActionsExecutable(
+                    effective, prepared.classLoaderOrDefault(userCodeClassLoader.get()));
             prepared.resourceCache =
-                    new ResourceCache(effective.getResourceProviders(), userCodeClassLoader.get());
+                    new ResourceCache(
+                            effective.getResourceProviders(),
+                            prepared.classLoaderOrDefault(userCodeClassLoader.get()));
         } catch (Exception e) {
             prepared.close();
             throw e;
         }
         pending = prepared;
+    }
+
+    /** Re-validates the pending Java artifact at the last safe point before switching plans. */
+    void validatePendingJavaArtifact() throws Exception {
+        checkState(pending != null, "No pending AgentPlan to validate.");
+        validateJavaArtifactMetadata(pending.plan);
+        validateJavaArtifactTransition(current.plan, pending.plan);
     }
 
     /** Drops the pending plan and closes resources prepared for it. */
@@ -265,10 +297,20 @@ class PlanVersionManager {
 
     /**
      * Job-level configuration is pinned at submission: the effective plan keeps the update's
-     * actions/routing/resources but carries the bootstrap {@code AgentConfiguration}.
+     * actions/routing/resources but carries the bootstrap {@code AgentConfiguration}, except for
+     * the update's Java artifact path and sha256 keys, which are plan-scoped by nature.
      */
     private AgentPlan withBootstrapConfig(AgentPlan received) {
         Map<String, Object> merged = new HashMap<>(bootstrapPlan.getConfig().getConfData());
+        PLAN_SCOPED_CONFIG_KEYS.forEach(merged::remove);
+        received.getConfig()
+                .getConfData()
+                .forEach(
+                        (key, value) -> {
+                            if (PLAN_SCOPED_CONFIG_KEYS.contains(key)) {
+                                merged.put(key, value);
+                            }
+                        });
         return new AgentPlan(
                 received.getActions(),
                 received.getActionsByEvent(),
@@ -296,17 +338,104 @@ class PlanVersionManager {
         }
     }
 
+    @Nullable
+    private ClassLoader createArtifactClassLoader(AgentPlan plan) throws Exception {
+        validateJavaArtifactMetadata(plan);
+        String artifactPath = normalizedConfigValue(plan, JAVA_ARTIFACT_PATH_CONFIG);
+        if (artifactPath == null) {
+            return null;
+        }
+        Path path = Path.of(artifactPath);
+        return new PlanArtifactClassLoader(
+                new URL[] {path.toUri().toURL()}, userCodeClassLoader.get());
+    }
+
+    private static void validateJavaArtifactMetadata(AgentPlan plan) throws Exception {
+        String artifactPath = normalizedConfigValue(plan, JAVA_ARTIFACT_PATH_CONFIG);
+        String expectedSha256 = normalizedConfigValue(plan, JAVA_ARTIFACT_SHA256_CONFIG);
+        checkState(
+                (artifactPath == null) == (expectedSha256 == null),
+                "%s and %s must be configured together.",
+                JAVA_ARTIFACT_PATH_CONFIG,
+                JAVA_ARTIFACT_SHA256_CONFIG);
+        if (artifactPath == null) {
+            return;
+        }
+
+        Path path = Path.of(artifactPath);
+        checkState(
+                Files.isRegularFile(path),
+                "Java artifact path %s is not a readable file.",
+                artifactPath);
+        checkState(
+                expectedSha256.matches("(?i)[0-9a-f]{64}"),
+                "%s must contain exactly 64 hexadecimal characters.",
+                JAVA_ARTIFACT_SHA256_CONFIG);
+        String actual = PlanIds.sha256HexOfFile(path);
+        checkState(
+                actual.equalsIgnoreCase(expectedSha256),
+                "Java artifact %s failed sha256 verification: expected %s but was %s.",
+                artifactPath,
+                expectedSha256,
+                actual);
+    }
+
+    private static void validateJavaArtifactTransition(AgentPlan currentPlan, AgentPlan newPlan) {
+        String currentArtifactPath = normalizedConfigValue(currentPlan, JAVA_ARTIFACT_PATH_CONFIG);
+        String newArtifactPath = normalizedConfigValue(newPlan, JAVA_ARTIFACT_PATH_CONFIG);
+        if (sameConfiguredPath(currentArtifactPath, newArtifactPath)) {
+            String currentSha = normalizedSha(currentPlan);
+            String newSha = normalizedSha(newPlan);
+            checkState(
+                    Objects.equals(currentSha, newSha),
+                    "%s is immutable; use a new path for a different digest: %s.",
+                    JAVA_ARTIFACT_PATH_CONFIG,
+                    currentArtifactPath);
+        }
+    }
+
+    private static boolean sameConfiguredPath(
+            @Nullable String currentPath, @Nullable String newPath) {
+        if (currentPath == null || newPath == null) {
+            return false;
+        }
+        try {
+            Path current = Path.of(currentPath).toAbsolutePath().normalize();
+            Path next = Path.of(newPath).toAbsolutePath().normalize();
+            return current.equals(next) || Files.isSameFile(current, next);
+        } catch (Exception ignored) {
+            return currentPath.equals(newPath);
+        }
+    }
+
+    @Nullable
+    private static String normalizedSha(AgentPlan plan) {
+        String sha = normalizedConfigValue(plan, JAVA_ARTIFACT_SHA256_CONFIG);
+        return sha == null ? null : sha.toLowerCase(Locale.ROOT);
+    }
+
+    @Nullable
+    private static String normalizedConfigValue(AgentPlan plan, String key) {
+        String configured = plan.getConfig().getStr(key, null);
+        return configured == null || configured.trim().isEmpty() ? null : configured.trim();
+    }
+
     /** One plan version and the plan-scoped resources tied to it. */
     private static final class PlanSlot {
         final long version;
         @Nullable private String canonicalPlanJson;
         final AgentPlan plan;
+        @Nullable ClassLoader classLoader;
         @Nullable ResourceCache resourceCache;
 
         PlanSlot(long version, @Nullable String canonicalPlanJson, AgentPlan plan) {
             this.version = version;
             this.canonicalPlanJson = canonicalPlanJson;
             this.plan = plan;
+        }
+
+        ClassLoader classLoaderOrDefault(ClassLoader fallback) {
+            return classLoader != null ? classLoader : fallback;
         }
 
         /** Lazily computed for the bootstrap plan: only needed once a snapshot must persist it. */
@@ -318,9 +447,29 @@ class PlanVersionManager {
         }
 
         void close() throws Exception {
+            Exception firstException = null;
             if (resourceCache != null) {
-                resourceCache.close();
+                try {
+                    resourceCache.close();
+                } catch (Exception e) {
+                    firstException = e;
+                }
                 resourceCache = null;
+            }
+            if (classLoader instanceof Closeable) {
+                try {
+                    ((Closeable) classLoader).close();
+                } catch (Exception e) {
+                    if (firstException == null) {
+                        firstException = e;
+                    } else {
+                        firstException.addSuppressed(e);
+                    }
+                }
+                classLoader = null;
+            }
+            if (firstException != null) {
+                throw firstException;
             }
         }
     }
@@ -336,6 +485,48 @@ class PlanVersionManager {
         public CurrentPlanRecord(long version, String canonicalPlanJson) {
             this.version = version;
             this.canonicalPlanJson = canonicalPlanJson;
+        }
+    }
+
+    private static final class PlanArtifactClassLoader extends URLClassLoader {
+        static {
+            registerAsParallelCapable();
+        }
+
+        private PlanArtifactClassLoader(URL[] urls, ClassLoader parent) {
+            super(urls, parent);
+        }
+
+        @Override
+        protected Class<?> loadClass(String name, boolean resolve) throws ClassNotFoundException {
+            synchronized (getClassLoadingLock(name)) {
+                Class<?> loaded = findLoadedClass(name);
+                if (loaded == null) {
+                    if (isParentFirstClass(name)) {
+                        loaded = super.loadClass(name, false);
+                    } else {
+                        try {
+                            loaded = findClass(name);
+                        } catch (ClassNotFoundException ignored) {
+                            loaded = super.loadClass(name, false);
+                        }
+                    }
+                }
+                if (resolve) {
+                    resolveClass(loaded);
+                }
+                return loaded;
+            }
+        }
+
+        private static boolean isParentFirstClass(String name) {
+            return name.startsWith("java.")
+                    || name.startsWith("javax.")
+                    || name.startsWith("jakarta.")
+                    || name.startsWith("sun.")
+                    || name.startsWith("com.sun.")
+                    || name.startsWith("org.apache.flink.")
+                    || name.startsWith("org.slf4j.");
         }
     }
 }

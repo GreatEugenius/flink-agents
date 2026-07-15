@@ -21,7 +21,7 @@ package org.apache.flink.agents.runtime;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.flink.agents.plan.AgentPlan;
-import org.apache.flink.agents.runtime.operator.ActionExecutionOperatorFactory;
+import org.apache.flink.agents.runtime.operator.CoordinatedActionExecutionOperatorFactory;
 import org.apache.flink.api.common.typeinfo.TypeInformation;
 import org.apache.flink.api.java.functions.KeySelector;
 import org.apache.flink.streaming.api.datastream.DataStream;
@@ -74,12 +74,32 @@ public class CompileUtils {
             AgentPlan agentPlan,
             TypeInformation<OUT> outTypeInformation,
             boolean inputIsJava) {
+        return coordinatedConnect(keyedInputStream, agentPlan, outTypeInformation, inputIsJava);
+    }
+
+    /** Stable uid of the coordinated agent operator. */
+    public static final String COORDINATED_OPERATOR_UID = "flink-agents-coordinated-operator";
+
+    /**
+     * The only wiring: the agent operator is always coordinated, so every job can receive plan
+     * updates as OperatorEvents from the JM-side coordinator without opting in. Addressed by the
+     * operator vertex id discoverable from {@code GET /jobs/{jobId}}. Jobs built with releases
+     * before this feature keep running on their release; upgrading changes the operator uid and
+     * therefore requires a fresh start (no state compatibility is provided).
+     */
+    private static <K, IN, OUT> DataStream<OUT> coordinatedConnect(
+            KeyedStream<IN, K> keyedInputStream,
+            AgentPlan agentPlan,
+            TypeInformation<OUT> outTypeInformation,
+            boolean inputIsJava) {
         return (DataStream<OUT>)
                 keyedInputStream
                         .transform(
-                                "action-execute-operator",
+                                "coordinated-action-execute-operator",
                                 outTypeInformation,
-                                new ActionExecutionOperatorFactory(agentPlan, inputIsJava))
+                                new CoordinatedActionExecutionOperatorFactory<>(
+                                        agentPlan, inputIsJava))
+                        .uid(COORDINATED_OPERATOR_UID)
                         .setParallelism(keyedInputStream.getParallelism());
     }
 }

@@ -20,14 +20,20 @@ package org.apache.flink.agents.runtime.operator;
 import org.apache.flink.agents.api.InputEvent;
 import org.apache.flink.agents.plan.AgentPlan;
 import org.apache.flink.agents.plan.actions.Action;
+import org.apache.flink.agents.runtime.python.utils.PythonActionExecutor;
 import org.apache.flink.api.common.ExecutionConfig;
 import org.apache.flink.api.common.JobID;
 import org.junit.jupiter.api.Test;
+import pemja.core.PythonInterpreter;
 
 import java.util.List;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 
 /** Contract tests for {@link PythonBridgeManager}. */
 class PythonBridgeManagerTest {
@@ -58,5 +64,19 @@ class PythonBridgeManagerTest {
             assertThat(bridge.getPythonActionExecutor()).isNull();
             assertThat(bridge.getPythonRunnerContext()).isNull();
         }
+    }
+
+    @Test
+    void runtimeCloseStillClosesInterpreterWhenExecutorCloseFails() throws Exception {
+        PythonActionExecutor executor = mock(PythonActionExecutor.class);
+        PythonInterpreter interpreter = mock(PythonInterpreter.class);
+        doThrow(new Exception("executor close failed")).when(executor).close();
+
+        PythonBridgeManager.PlanPythonRuntime runtime =
+                new PythonBridgeManager.PlanPythonRuntime(
+                        executor, null, null, null, null, interpreter);
+
+        assertThatThrownBy(runtime::close).hasMessageContaining("executor close failed");
+        verify(interpreter).close();
     }
 }

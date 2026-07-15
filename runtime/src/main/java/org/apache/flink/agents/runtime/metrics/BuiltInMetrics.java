@@ -39,9 +39,14 @@ public class BuiltInMetrics {
 
     private final Counter eventLogTruncatedEvents;
 
+    private final Counter dynamicPlanUpdateRejected;
+
     private final HashMap<String, BuiltInActionMetrics> actionMetricGroups;
 
+    private final FlinkAgentsMetricGroupImpl parentMetricGroup;
+
     public BuiltInMetrics(FlinkAgentsMetricGroupImpl parentMetricGroup, AgentPlan agentPlan) {
+        this.parentMetricGroup = parentMetricGroup;
         Counter numOfEventsProcessed = parentMetricGroup.getCounter("numOfEventProcessed");
         this.numOfEventProcessedPerSec =
                 parentMetricGroup.getMeter("numOfEventProcessedPerSec", numOfEventsProcessed);
@@ -51,6 +56,8 @@ public class BuiltInMetrics {
                 parentMetricGroup.getMeter("numOfActionsExecutedPerSec", numOfActionsExecuted);
 
         this.eventLogTruncatedEvents = parentMetricGroup.getCounter("eventLogTruncatedEvents");
+
+        this.dynamicPlanUpdateRejected = parentMetricGroup.getCounter("dynamicPlanUpdateRejected");
 
         this.actionMetricGroups = new HashMap<>();
         for (String actionName : agentPlan.getActions().keySet()) {
@@ -71,7 +78,18 @@ public class BuiltInMetrics {
      */
     public void markActionExecuted(String actionName) {
         numOfActionsExecutedPerSec.markEvent();
-        actionMetricGroups.get(actionName).markActionExecuted();
+        actionMetricGroups
+                .computeIfAbsent(
+                        actionName,
+                        name ->
+                                new BuiltInActionMetrics(
+                                        parentMetricGroup.getSubGroup("action", name)))
+                .markActionExecuted();
+    }
+
+    /** Records a dynamic AgentPlan update that was rejected (e.g. malformed JSON, validation). */
+    public void markDynamicPlanUpdateRejected() {
+        dynamicPlanUpdateRejected.inc();
     }
 
     /** Returns the counter tracking event log truncation occurrences. */

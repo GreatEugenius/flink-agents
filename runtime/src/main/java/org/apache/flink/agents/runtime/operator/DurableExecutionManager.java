@@ -51,6 +51,7 @@ import java.util.Map;
 import static org.apache.flink.agents.api.configuration.AgentConfigOptions.ACTION_STATE_STORE_BACKEND;
 import static org.apache.flink.agents.runtime.actionstate.ActionStateStore.BackendType.FLUSS;
 import static org.apache.flink.agents.runtime.actionstate.ActionStateStore.BackendType.KAFKA;
+import static org.apache.flink.util.Preconditions.checkState;
 
 /**
  * Owns the durable-execution side of {@link ActionExecutionOperator}: the optional {@link
@@ -129,6 +130,17 @@ class DurableExecutionManager implements ActionStatePersister, AutoCloseable {
 
     boolean hasDurableStore() {
         return actionStateStore != null;
+    }
+
+    /**
+     * Scopes durable action-state keys by the live plan version so a replay never reuses results
+     * written under a different plan (relevant in the aborted-switch-checkpoint window). Called at
+     * open with the restored plan version and again at every plan switch.
+     */
+    void setActivePlanVersion(long planVersion) {
+        if (actionStateStore != null) {
+            actionStateStore.setActivePlanVersion(planVersion);
+        }
     }
 
     void initRecoveryMarkerState(OperatorStateBackend operatorStateBackend) throws Exception {
@@ -449,6 +461,12 @@ class DurableExecutionManager implements ActionStatePersister, AutoCloseable {
 
     boolean hasDurableContext(ActionTask actionTask) {
         return actionTaskDurableContexts.containsKey(actionTask);
+    }
+
+    void checkNoInFlightActionContexts() {
+        checkState(
+                actionTaskDurableContexts.isEmpty(),
+                "Cannot switch AgentPlan while durable action contexts are still in flight.");
     }
 
     @VisibleForTesting

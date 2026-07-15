@@ -34,6 +34,7 @@ import org.apache.flink.agents.runtime.python.utils.PythonActionExecutor;
 import org.apache.flink.agents.runtime.python.utils.PythonResourceAdapterImpl;
 import org.apache.flink.api.common.ExecutionConfig;
 import org.apache.flink.api.common.JobID;
+import org.apache.flink.api.common.cache.DistributedCache;
 import org.apache.flink.python.env.PythonDependencyInfo;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -49,7 +50,7 @@ import static org.apache.flink.agents.plan.actions.Utils.supportAsync;
 
 /**
  * Owns the embedded Python runtime used by {@link ActionExecutionOperator} when an agent plan
- * contains Python actions or Python-defined resources.
+ * contains Python actions/resources or uses the Python pipeline wire format.
  *
  * <p>Owned state:
  *
@@ -62,11 +63,11 @@ import static org.apache.flink.agents.plan.actions.Utils.supportAsync;
  * </ul>
  *
  * <p>Lifecycle: instantiated by the operator's {@code open()} (lazy — not in the operator
- * constructor), then immediately initialized via {@link #open} in the same call. {@link #open} is a
- * no-op when the agent plan contains no Python actions and no Python resources — in that case all
- * accessors return {@code null} and {@link #isInitialized()} returns {@code false}. {@link
- * #close()} closes the owned resources in the reverse order of creation: {@code
- * pythonActionExecutor} → {@code pythonInterpreter} → {@code pythonEnvironmentManager}.
+ * constructor), then initialized via {@link #open}. At most one plan runtime is executable in the
+ * process: after the activation barrier drains the old plan, {@link #activatePlan} closes its
+ * interpreter and constructs the replacement. A Java-only plan still has a runtime when the
+ * surrounding pipeline uses Python wire encoding, because input/output conversion runs in Python.
+ * {@link #close()} closes the active interpreter and the shared environment manager.
  *
  * <p>Design constraint: package-private; no manager-to-manager held references. Other managers
  * receive what they need (e.g. the Python runner context, the action executor) via method
@@ -77,28 +78,39 @@ class PythonBridgeManager implements AutoCloseable {
     private static final Logger LOG = LoggerFactory.getLogger(PythonBridgeManager.class);
 
     private PythonEnvironmentManager pythonEnvironmentManager;
-    private PythonInterpreter pythonInterpreter;
-    private PythonActionExecutor pythonActionExecutor;
-    private PythonRunnerContextImpl pythonRunnerContext;
-    private PythonResourceAdapterImpl pythonResourceAdapter;
-    private JavaResourceAdapter javaResourceAdapter;
-    private Mem0LongTermMemory longTermMemory;
+    @Nullable private PlanPythonRuntime activeRuntime;
+    private final boolean pythonWireFormat;
+
+    private ExecutionConfig executionConfig;
+    private DistributedCache distributedCache;
+    private String[] tmpDirs;
+    private JobID jobId;
+    private FlinkAgentsMetricGroupImpl metricGroup;
+    private Runnable mailboxThreadChecker;
+    private String jobIdentifier;
+    private ClassLoader userCodeClassLoader;
+
     private boolean initialized;
 
     PythonBridgeManager() {
+        this(false);
+    }
+
+    PythonBridgeManager(boolean pythonWireFormat) {
+        this.pythonWireFormat = pythonWireFormat;
         this.initialized = false;
     }
 
     /**
      * Initializes the Python runtime if the agent plan needs it.
      *
-     * <p>Scans the agent plan for any {@link PythonFunction} action or {@link
-     * PythonResourceProvider}. If neither is present, this method is a no-op and {@link
-     * #isInitialized()} stays {@code false}. Otherwise it builds the {@link
-     * PythonEnvironmentManager}, opens an embedded {@link PythonInterpreter}, constructs the shared
-     * {@link PythonRunnerContextImpl}, wires the Java/Python resource adapters, and conditionally
-     * initializes the Python action executor and the Python resource adapter (each only when the
-     * corresponding component is present in the plan).
+     * <p>Scans the agent plan for any {@link PythonFunction} action, {@link
+     * PythonResourceProvider}, Mem0 configuration, or a Python pipeline wire format. If none is
+     * present, this method is a no-op and {@link #isInitialized()} stays {@code false}. Otherwise
+     * it builds the {@link PythonEnvironmentManager}, opens an embedded {@link PythonInterpreter},
+     * constructs the shared {@link PythonRunnerContextImpl}, wires the Java/Python resource
+     * adapters, and conditionally initializes the Python action executor and the Python resource
+     * adapter.
      *
      * @param agentPlan the agent plan describing actions and resources.
      * @param resourceCache the resource cache visible to both languages.
@@ -117,7 +129,7 @@ class PythonBridgeManager implements AutoCloseable {
             AgentPlan agentPlan,
             ResourceCache resourceCache,
             ExecutionConfig executionConfig,
-            org.apache.flink.api.common.cache.DistributedCache distributedCache,
+            DistributedCache distributedCache,
             String[] tmpDirs,
             JobID jobId,
             FlinkAgentsMetricGroupImpl metricGroup,
@@ -125,58 +137,128 @@ class PythonBridgeManager implements AutoCloseable {
             String jobIdentifier,
             ClassLoader userCodeClassLoader)
             throws Exception {
-        boolean containPythonAction =
-                agentPlan.getActions().values().stream()
-                        .anyMatch(action -> action.getExec() instanceof PythonFunction);
+        this.executionConfig = executionConfig;
+        this.distributedCache = distributedCache;
+        this.tmpDirs = tmpDirs;
+        this.jobId = jobId;
+        this.metricGroup = metricGroup;
+        this.mailboxThreadChecker = mailboxThreadChecker;
+        this.jobIdentifier = jobIdentifier;
+        this.userCodeClassLoader = userCodeClassLoader;
 
-        boolean containPythonResource =
-                agentPlan.getResourceProviders().values().stream()
-                        .anyMatch(
-                                resourceProviderMap ->
-                                        resourceProviderMap.values().stream()
-                                                .anyMatch(
-                                                        resourceProvider ->
-                                                                resourceProvider
-                                                                        instanceof
-                                                                        PythonResourceProvider));
+        activeRuntime = createPlanRuntime(agentPlan, resourceCache);
+    }
 
+    @Nullable
+    private PlanPythonRuntime createPlanRuntime(AgentPlan agentPlan, ResourceCache resourceCache)
+            throws Exception {
+        boolean containPythonAction = containsPythonAction(agentPlan);
+        boolean containPythonResource = containsPythonResource(agentPlan);
         boolean mem0Configured = isMem0Configured(agentPlan);
 
-        if (containPythonAction || containPythonResource || mem0Configured) {
-            LOG.debug("Begin initialize PythonEnvironmentManager.");
-            PythonDependencyInfo dependencyInfo =
-                    PythonDependencyInfo.create(
-                            executionConfig.toConfiguration(), distributedCache);
-            pythonEnvironmentManager =
-                    new PythonEnvironmentManager(
-                            dependencyInfo, tmpDirs, new HashMap<>(System.getenv()), jobId);
-            pythonEnvironmentManager.open();
-            EmbeddedPythonEnvironment env = pythonEnvironmentManager.createEnvironment();
-            pythonInterpreter = env.getInterpreter();
-            pythonRunnerContext =
+        if (!needsPythonRuntime(agentPlan)) {
+            return null;
+        }
+
+        PythonInterpreter interpreter = createPythonInterpreter();
+        PythonActionExecutor pythonActionExecutor = null;
+        try {
+            PythonRunnerContextImpl pythonRunnerContext =
                     new PythonRunnerContextImpl(
                             metricGroup,
                             mailboxThreadChecker,
                             agentPlan,
                             resourceCache,
                             jobIdentifier);
-
-            javaResourceAdapter =
+            JavaResourceAdapter javaResourceAdapter =
                     new JavaResourceAdapter(
-                            resourceCache.getResourceContext(),
-                            pythonInterpreter,
-                            userCodeClassLoader);
+                            resourceCache.getResourceContext(), interpreter, userCodeClassLoader);
+
+            PythonResourceAdapterImpl pythonResourceAdapter = null;
             if (containPythonResource || mem0Configured) {
-                initPythonResourceAdapter(agentPlan, resourceCache);
+                pythonResourceAdapter =
+                        initPythonResourceAdapter(
+                                agentPlan, resourceCache, javaResourceAdapter, interpreter);
             }
-            if (containPythonAction || mem0Configured) {
-                initPythonActionExecutor(agentPlan, jobIdentifier);
+
+            if (containPythonAction || mem0Configured || pythonWireFormat) {
+                pythonActionExecutor =
+                        initPythonActionExecutor(
+                                agentPlan, javaResourceAdapter, pythonRunnerContext, interpreter);
             }
+
+            Mem0LongTermMemory longTermMemory = null;
             if (mem0Configured) {
-                wireLongTermMemory();
+                longTermMemory =
+                        wireLongTermMemory(
+                                pythonActionExecutor, pythonResourceAdapter, interpreter);
             }
-            initialized = true;
+
+            return new PlanPythonRuntime(
+                    pythonActionExecutor,
+                    pythonRunnerContext,
+                    pythonResourceAdapter,
+                    javaResourceAdapter,
+                    longTermMemory,
+                    interpreter);
+        } catch (Exception creationFailure) {
+            if (pythonActionExecutor != null) {
+                try {
+                    pythonActionExecutor.close();
+                } catch (Exception closeFailure) {
+                    creationFailure.addSuppressed(closeFailure);
+                }
+            }
+            try {
+                interpreter.close();
+            } catch (Exception closeFailure) {
+                creationFailure.addSuppressed(closeFailure);
+            }
+            throw creationFailure;
         }
+    }
+
+    private PythonInterpreter createPythonInterpreter() throws Exception {
+        ensurePythonEnvironment();
+        EmbeddedPythonEnvironment env = pythonEnvironmentManager.createEnvironment();
+        return env.getInterpreter();
+    }
+
+    private void ensurePythonEnvironment() throws Exception {
+        if (initialized) {
+            return;
+        }
+        LOG.debug("Begin initialize PythonEnvironmentManager.");
+        PythonDependencyInfo dependencyInfo =
+                PythonDependencyInfo.create(executionConfig.toConfiguration(), distributedCache);
+        pythonEnvironmentManager =
+                new PythonEnvironmentManager(
+                        dependencyInfo, tmpDirs, new HashMap<>(System.getenv()), jobId);
+        pythonEnvironmentManager.open();
+        initialized = true;
+    }
+
+    private boolean containsPythonAction(AgentPlan agentPlan) {
+        return agentPlan.getActions().values().stream()
+                .anyMatch(action -> action.getExec() instanceof PythonFunction);
+    }
+
+    private boolean containsPythonResource(AgentPlan agentPlan) {
+        return agentPlan.getResourceProviders().values().stream()
+                .anyMatch(
+                        resourceProviderMap ->
+                                resourceProviderMap.values().stream()
+                                        .anyMatch(
+                                                resourceProvider ->
+                                                        resourceProvider
+                                                                instanceof PythonResourceProvider));
+    }
+
+    private boolean needsPythonRuntime(AgentPlan agentPlan) {
+        return pythonWireFormat
+                || containsPythonAction(agentPlan)
+                || containsPythonResource(agentPlan)
+                || isMem0Configured(agentPlan);
     }
 
     /**
@@ -220,9 +302,12 @@ class PythonBridgeManager implements AutoCloseable {
      * {@code create_flink_runner_context} already initialised via {@code _init_long_term_memory})
      * and wrap it as a Java {@link Mem0LongTermMemory}.
      */
-    private void wireLongTermMemory() {
+    private Mem0LongTermMemory wireLongTermMemory(
+            PythonActionExecutor pythonActionExecutor,
+            PythonResourceAdapterImpl pythonResourceAdapter,
+            PythonInterpreter interpreter) {
         PyObject pyCtx = pythonActionExecutor.getPythonRunnerContext();
-        Object pyLtm = pythonInterpreter.invoke("python_java_utils.get_long_term_memory", pyCtx);
+        Object pyLtm = interpreter.invokeMethod("python_java_utils", "get_long_term_memory", pyCtx);
         if (pyLtm == null) {
             throw new IllegalStateException(
                     String.format(
@@ -234,47 +319,85 @@ class PythonBridgeManager implements AutoCloseable {
                             LongTermMemoryOptions.Mem0.EMBEDDING_MODEL_SETUP.getKey(),
                             LongTermMemoryOptions.Mem0.VECTOR_STORE.getKey()));
         }
-        longTermMemory = new Mem0LongTermMemory(pythonResourceAdapter, (PyObject) pyLtm);
+        return new Mem0LongTermMemory(pythonResourceAdapter, (PyObject) pyLtm);
     }
 
-    private void initPythonActionExecutor(AgentPlan agentPlan, String jobIdentifier)
+    private PythonActionExecutor initPythonActionExecutor(
+            AgentPlan agentPlan,
+            JavaResourceAdapter javaResourceAdapter,
+            PythonRunnerContextImpl pythonRunnerContext,
+            PythonInterpreter interpreter)
             throws Exception {
-        pythonActionExecutor =
+        PythonActionExecutor pythonActionExecutor =
                 new PythonActionExecutor(
-                        pythonInterpreter,
+                        interpreter,
                         agentPlan,
                         javaResourceAdapter,
                         pythonRunnerContext,
                         jobIdentifier);
-        pythonActionExecutor.open();
+        try {
+            pythonActionExecutor.open();
+            return pythonActionExecutor;
+        } catch (Exception openFailure) {
+            try {
+                pythonActionExecutor.close();
+            } catch (Exception closeFailure) {
+                openFailure.addSuppressed(closeFailure);
+            }
+            throw openFailure;
+        }
     }
 
-    private void initPythonResourceAdapter(AgentPlan agentPlan, ResourceCache resourceCache)
+    /**
+     * Rebuilds the Python-visible runtime while the checkpoint barrier still blocks input. The old
+     * runtime is quiesced and closed before the replacement is constructed and its declared Python
+     * action entries are resolved.
+     *
+     * <p>Any failure escapes the barrier. There is no local rollback after the old runtime has been
+     * closed; the task must recover from the previous completed checkpoint.
+     */
+    void activatePlan(AgentPlan newPlan, ResourceCache newResourceCache) throws Exception {
+        closeActiveRuntime();
+        activeRuntime = createPlanRuntime(newPlan, newResourceCache);
+    }
+
+    /** Stops old-plan async work before its interpreter and Java-side resources are released. */
+    void quiescePlan() throws Exception {
+        if (activeRuntime != null) {
+            activeRuntime.quiesce();
+        }
+    }
+
+    private PythonResourceAdapterImpl initPythonResourceAdapter(
+            AgentPlan agentPlan,
+            ResourceCache resourceCache,
+            JavaResourceAdapter javaResourceAdapter,
+            PythonInterpreter interpreter)
             throws Exception {
-        pythonResourceAdapter =
+        PythonResourceAdapterImpl pythonResourceAdapter =
                 new PythonResourceAdapterImpl(
-                        resourceCache.getResourceContext(), pythonInterpreter, javaResourceAdapter);
+                        resourceCache.getResourceContext(), interpreter, javaResourceAdapter);
         pythonResourceAdapter.open();
         PythonMCPResourceDiscovery.discoverPythonMCPResources(
                 agentPlan.getResourceProviders(), pythonResourceAdapter, resourceCache);
+        return pythonResourceAdapter;
     }
 
     /**
-     * @return the Python action executor, or {@code null} if the agent plan contains no Python
-     *     actions (or {@link #open} has not yet been called).
+     * @return the Python action executor of the active plan, or {@code null}.
      */
     @Nullable
     PythonActionExecutor getPythonActionExecutor() {
-        return pythonActionExecutor;
+        return activeRuntime == null ? null : activeRuntime.pythonActionExecutor;
     }
 
     /**
-     * @return the Python runner context, or {@code null} if no Python runtime was initialized
-     *     because the agent plan has neither Python actions nor Python resources.
+     * @return the Python runner context for the initial plan, or {@code null} if no Python runtime
+     *     was initialized because the agent plan has neither Python actions nor Python resources.
      */
     @Nullable
     PythonRunnerContextImpl getPythonRunnerContext() {
-        return pythonRunnerContext;
+        return activeRuntime == null ? null : activeRuntime.pythonRunnerContext;
     }
 
     /**
@@ -282,23 +405,108 @@ class PythonBridgeManager implements AutoCloseable {
      */
     @Nullable
     Mem0LongTermMemory getLongTermMemory() {
-        return longTermMemory;
+        return activeRuntime == null ? null : activeRuntime.longTermMemory;
     }
 
     boolean isInitialized() {
         return initialized;
     }
 
+    private void closeActiveRuntime() throws Exception {
+        PlanPythonRuntime runtime = activeRuntime;
+        activeRuntime = null;
+        if (runtime != null) {
+            runtime.close();
+        }
+    }
+
     @Override
     public void close() throws Exception {
-        if (pythonActionExecutor != null) {
-            pythonActionExecutor.close();
-        }
-        if (pythonInterpreter != null) {
-            pythonInterpreter.close();
+        Exception firstException = null;
+        try {
+            closeActiveRuntime();
+        } catch (Exception e) {
+            firstException = e;
         }
         if (pythonEnvironmentManager != null) {
-            pythonEnvironmentManager.close();
+            try {
+                pythonEnvironmentManager.close();
+            } catch (Exception e) {
+                if (firstException == null) {
+                    firstException = e;
+                } else {
+                    firstException.addSuppressed(e);
+                }
+            }
+        }
+        if (firstException != null) {
+            throw firstException;
+        }
+    }
+
+    static final class PlanPythonRuntime implements AutoCloseable {
+        private final PythonActionExecutor pythonActionExecutor;
+        private final PythonRunnerContextImpl pythonRunnerContext;
+        private final PythonResourceAdapterImpl pythonResourceAdapter;
+        private final JavaResourceAdapter javaResourceAdapter;
+        private final Mem0LongTermMemory longTermMemory;
+        private final PythonInterpreter pythonInterpreter;
+        private boolean quiesced;
+        private boolean closed;
+
+        PlanPythonRuntime(
+                PythonActionExecutor pythonActionExecutor,
+                PythonRunnerContextImpl pythonRunnerContext,
+                PythonResourceAdapterImpl pythonResourceAdapter,
+                JavaResourceAdapter javaResourceAdapter,
+                Mem0LongTermMemory longTermMemory,
+                PythonInterpreter pythonInterpreter) {
+            this.pythonActionExecutor = pythonActionExecutor;
+            this.pythonRunnerContext = pythonRunnerContext;
+            this.pythonResourceAdapter = pythonResourceAdapter;
+            this.javaResourceAdapter = javaResourceAdapter;
+            this.longTermMemory = longTermMemory;
+            this.pythonInterpreter = pythonInterpreter;
+            this.quiesced = false;
+            this.closed = false;
+        }
+
+        private void quiesce() throws Exception {
+            if (quiesced || closed) {
+                return;
+            }
+            if (pythonActionExecutor != null) {
+                pythonActionExecutor.close();
+            }
+            quiesced = true;
+        }
+
+        @Override
+        public void close() throws Exception {
+            if (closed) {
+                return;
+            }
+            Exception firstException = null;
+            try {
+                quiesce();
+            } catch (Exception e) {
+                firstException = e;
+            }
+            if (pythonInterpreter != null) {
+                try {
+                    pythonInterpreter.close();
+                } catch (Exception e) {
+                    if (firstException == null) {
+                        firstException = e;
+                    } else {
+                        firstException.addSuppressed(e);
+                    }
+                }
+            }
+            closed = true;
+            if (firstException != null) {
+                throw firstException;
+            }
         }
     }
 }

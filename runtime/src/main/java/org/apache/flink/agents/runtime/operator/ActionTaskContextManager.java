@@ -315,6 +315,30 @@ class ActionTaskContextManager implements AutoCloseable {
         pythonAwaitableRefs.remove(actionTask);
     }
 
+    /**
+     * Releases the plan-scoped Java runner context after the activation barrier drained all action
+     * chains. The continuation executor is job-scoped and remains available; the next Java action
+     * lazily creates a context bound to the new plan and its ResourceCache.
+     */
+    void resetForPlanSwitch() throws Exception {
+        org.apache.flink.util.Preconditions.checkState(
+                actionTaskMemoryContexts.isEmpty()
+                        && continuationContexts.isEmpty()
+                        && pythonAwaitableRefs.isEmpty(),
+                "Cannot switch AgentPlan while action-task contexts are still in flight.");
+        if (runnerContext != null) {
+            runnerContext.checkNoPendingEvents();
+            org.apache.flink.util.Preconditions.checkState(
+                    runnerContext.getDurableExecutionContext() == null,
+                    "Cannot switch AgentPlan while a durable execution context is still in flight.");
+            try {
+                runnerContext.close();
+            } finally {
+                runnerContext = null;
+            }
+        }
+    }
+
     @Override
     public void close() throws Exception {
         if (runnerContext != null) {

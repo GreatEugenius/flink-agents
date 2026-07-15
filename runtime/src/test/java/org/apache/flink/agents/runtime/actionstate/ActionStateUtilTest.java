@@ -25,6 +25,8 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -61,6 +63,52 @@ public class ActionStateUtilTest {
 
         // Keys should be different for different inputs
         assertNotEquals(key1, key2);
+    }
+
+    @Test
+    public void testPlanVersionZeroPreservesLegacyKeyFormat() throws Exception {
+        Object key = "legacy-key";
+        Action action = new NoOpAction("legacy-action");
+        InputEvent inputEvent = new InputEvent("legacy-input");
+
+        String legacyKey = ActionStateUtil.generateKey(key, 1L, action, inputEvent);
+        String versionZeroKey = ActionStateUtil.generateKey(key, 1L, action, inputEvent, 0L);
+
+        assertEquals(legacyKey, versionZeroKey);
+        assertEquals(4, ActionStateUtil.parseKey(versionZeroKey).size());
+    }
+
+    @Test
+    public void testPlanVersionSeparatesOtherwiseIdenticalKeys() throws Exception {
+        Object key = "versioned-key";
+        Action action = new NoOpAction("versioned-action");
+        InputEvent inputEvent = new InputEvent("versioned-input");
+
+        String versionOne = ActionStateUtil.generateKey(key, 1L, action, inputEvent, 1L);
+        String versionTwo = ActionStateUtil.generateKey(key, 1L, action, inputEvent, 2L);
+
+        assertNotEquals(versionOne, versionTwo);
+        assertEquals("p1", ActionStateUtil.parseKey(versionOne).get(4));
+        assertEquals("p2", ActionStateUtil.parseKey(versionTwo).get(4));
+    }
+
+    @Test
+    public void testInMemoryStoreDoesNotReplayStateAcrossPlanVersions() throws Exception {
+        InMemoryActionStateStore store = new InMemoryActionStateStore(false);
+        Object key = "store-key";
+        Action action = new NoOpAction("store-action");
+        InputEvent inputEvent = new InputEvent("store-input");
+        ActionState state = new ActionState(inputEvent);
+
+        store.setActivePlanVersion(1L);
+        store.put(key, 1L, action, inputEvent, state);
+        assertSame(state, store.get(key, 1L, action, inputEvent));
+
+        store.setActivePlanVersion(2L);
+        assertNull(store.get(key, 1L, action, inputEvent));
+
+        store.setActivePlanVersion(1L);
+        assertSame(state, store.get(key, 1L, action, inputEvent));
     }
 
     @Test

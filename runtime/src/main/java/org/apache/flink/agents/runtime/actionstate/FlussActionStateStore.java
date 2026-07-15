@@ -189,10 +189,18 @@ public class FlussActionStateStore implements ActionStateStore {
                 tableName);
     }
 
+    // Dynamic-plan key scope; 0 = legacy format (see ActionStateStore#setActivePlanVersion).
+    private volatile long activePlanVersion;
+
+    @Override
+    public void setActivePlanVersion(long planVersion) {
+        this.activePlanVersion = planVersion;
+    }
+
     @Override
     public void put(Object key, long seqNum, Action action, Event event, ActionState state)
             throws Exception {
-        String stateKey = generateKey(key, seqNum, action, event);
+        String stateKey = generateKey(key, seqNum, action, event, activePlanVersion);
         byte[] payload = ActionStateSerde.serialize(state);
 
         GenericRow row =
@@ -214,7 +222,7 @@ public class FlussActionStateStore implements ActionStateStore {
 
     @Override
     public ActionState get(Object key, long seqNum, Action action, Event event) throws Exception {
-        String stateKey = generateKey(key, seqNum, action, event);
+        String stateKey = generateKey(key, seqNum, action, event, activePlanVersion);
         String keyPrefix = key.toString() + "_";
 
         boolean hasDivergence = checkDivergence(key.toString(), seqNum);

@@ -90,4 +90,13 @@ public interface ActionStateStore extends AutoCloseable {
     default Object getRecoveryMarker() {
         return null;
     }
+
+    /**
+     * Scopes subsequently generated state keys by the given dynamic plan version, isolating cached
+     * action results across plan versions. {@code 0} (the bootstrap plan) keeps the legacy key
+     * format. Implementations without dynamic plan support may ignore this.
+     *
+     * @param planVersion the version of the plan now live on this subtask
+     */
+    default void setActivePlanVersion(long planVersion) {}
 }

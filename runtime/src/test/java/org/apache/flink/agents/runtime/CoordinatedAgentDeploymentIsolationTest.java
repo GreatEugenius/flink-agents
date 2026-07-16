@@ -32,7 +32,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 /** Tests the deployment isolation contract of the coordinated agent operator. */
 class CoordinatedAgentDeploymentIsolationTest {
 
-    private static final String AGENT_SLOT_SHARING_GROUP = "flink-agents-action-execution";
+    private static final String AGENT_NAME = "review-agent";
+    private static final String AGENT_SLOT_SHARING_GROUP =
+            "flink-agents-action-execution:" + AGENT_NAME;
     private static final AgentPlan AGENT_PLAN =
             ActionExecutionOperatorTest.TestAgent.getAgentPlan(false);
 
@@ -49,8 +51,13 @@ class CoordinatedAgentDeploymentIsolationTest {
         StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
         KeyedStream<Long, Long> input = env.fromData(1L).keyBy(value -> value);
 
-        DataStream<Object> output = CompileUtils.connectToAgentWithCoordinator(input, AGENT_PLAN);
+        DataStream<Object> output =
+                CompileUtils.connectToAgentWithCoordinator(input, AGENT_NAME, AGENT_PLAN);
 
+        assertThat(output.getTransformation().getUid())
+                .isEqualTo("flink-agents-coordinated-operator:" + AGENT_NAME);
+        assertThat(output.getTransformation().getName())
+                .isEqualTo("coordinated-action-execute-operator:" + AGENT_NAME);
         assertThat(output.getTransformation().getSlotSharingGroup())
                 .hasValueSatisfying(
                         group -> assertThat(group.getName()).isEqualTo(AGENT_SLOT_SHARING_GROUP));

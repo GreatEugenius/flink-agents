@@ -68,6 +68,7 @@ public class CompileUtilsTest {
                                 return value;
                             }
                         },
+                        "TestAgent",
                         TEST_AGENT_PLAN);
         DataStream<Long> resultStream = agentOutputStream.map(x -> (long) x + 1);
 
@@ -86,7 +87,7 @@ public class CompileUtilsTest {
 
         KeyedStream<Long, Long> keyedInputStream = env.fromData(testSequence).keyBy(x -> x);
         DataStream<Object> workflowOutputStream =
-                CompileUtils.connectToAgent(keyedInputStream, TEST_AGENT_PLAN);
+                CompileUtils.connectToAgent(keyedInputStream, "TestAgent", TEST_AGENT_PLAN);
         DataStream<Long> resultStream = workflowOutputStream.map(x -> (long) x + 1);
 
         List<Long> resultList = new ArrayList<>();

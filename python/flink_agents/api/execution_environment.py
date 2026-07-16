@@ -22,11 +22,11 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, List
 if TYPE_CHECKING:
     from pathlib import Path
 
-from importlib_resources import files
 from pyflink.common import TypeInformation
 from pyflink.datastream import DataStream, KeySelector, StreamExecutionEnvironment
 from pyflink.table import Schema, StreamTableEnvironment, Table
 
+from flink_agents.api._java_utils import add_flink_agents_jars
 from flink_agents.api.agents.agent import Agent
 from flink_agents.api.configuration import Configuration
 from flink_agents.api.resource import (
@@ -34,7 +34,6 @@ from flink_agents.api.resource import (
     ResourceType,
     SerializableResource,
 )
-from flink_agents.api.version_compatibility import flink_version_manager
 
 
 class AgentBuilder(ABC):
@@ -130,35 +129,7 @@ class AgentsExecutionEnvironment(ABC):
             err_msg = "A StreamExecutionEnvironment is required."
             raise ValueError(err_msg)
 
-        major_version = flink_version_manager.major_version
-        if not major_version:
-            err_msg = "Apache Flink is not installed."
-            raise ModuleNotFoundError(err_msg)
-
-        lib_base = files("flink_agents.lib")
-
-        # Load the common JAR (shared dependencies)
-        common_lib = lib_base / "common"
-        if common_lib.is_dir():
-            for jar_file in common_lib.iterdir():
-                if jar_file.is_file() and str(jar_file).endswith(".jar"):
-                    env.add_jars(f"file://{jar_file}")
-        else:
-            err_msg = "Flink Agents common JAR not found."
-            raise FileNotFoundError(err_msg)
-
-        # Load the version-specific thin JAR
-        version_dir = f"flink-{major_version}"
-        version_lib = lib_base / version_dir
-
-        # Check if version-specific directory exists
-        if version_lib.is_dir():
-            for jar_file in version_lib.iterdir():
-                if jar_file.is_file() and str(jar_file).endswith(".jar"):
-                    env.add_jars(f"file://{jar_file}")
-        else:
-            err_msg = f"Flink Agents dist JAR for Flink {major_version} not found."
-            raise FileNotFoundError(err_msg)
+        add_flink_agents_jars(env)
 
         return importlib.import_module(
             "flink_agents.runtime.remote_execution_environment"

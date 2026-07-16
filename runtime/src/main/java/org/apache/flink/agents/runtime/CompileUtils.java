@@ -27,28 +27,34 @@ import org.apache.flink.api.java.functions.KeySelector;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.datastream.KeyedStream;
 import org.apache.flink.types.Row;
+import org.apache.flink.util.Preconditions;
 
 /** A utility class that bridges Flink DataStream/SQL with the Flink Agents agent. */
 public class CompileUtils {
 
     // ============================ invoke by python ====================================
     public static DataStream<byte[]> connectToAgent(
-            KeyedStream<Row, Row> inputDataStream, String agentPlanJson)
+            KeyedStream<Row, Row> inputDataStream, String agentName, String agentPlanJson)
             throws JsonProcessingException {
         // deserialize agent plan json.
         AgentPlan agentPlan = new ObjectMapper().readValue(agentPlanJson, AgentPlan.class);
-        return connectToAgent(inputDataStream, agentPlan, TypeInformation.of(byte[].class), false);
+        return connectToAgent(
+                inputDataStream, agentName, agentPlan, TypeInformation.of(byte[].class), false);
     }
 
     // ============================ invoke by java ====================================
     public static <IN, K> DataStream<Object> connectToAgent(
-            DataStream<IN> inputStream, KeySelector<IN, K> keySelector, AgentPlan agentPlan) {
-        return connectToAgent(inputStream.keyBy(keySelector), agentPlan);
+            DataStream<IN> inputStream,
+            KeySelector<IN, K> keySelector,
+            String agentName,
+            AgentPlan agentPlan) {
+        return connectToAgent(inputStream.keyBy(keySelector), agentName, agentPlan);
     }
 
     public static <IN, K> DataStream<Object> connectToAgent(
-            KeyedStream<IN, K> keyedInputStream, AgentPlan agentPlan) {
-        return connectToAgent(keyedInputStream, agentPlan, TypeInformation.of(Object.class), true);
+            KeyedStream<IN, K> keyedInputStream, String agentName, AgentPlan agentPlan) {
+        return connectToAgent(
+                keyedInputStream, agentName, agentPlan, TypeInformation.of(Object.class), true);
     }
 
     // ============================ basic ====================================
@@ -71,15 +77,40 @@ public class CompileUtils {
      */
     private static <K, IN, OUT> DataStream<OUT> connectToAgent(
             KeyedStream<IN, K> keyedInputStream,
+            String agentName,
             AgentPlan agentPlan,
             TypeInformation<OUT> outTypeInformation,
             boolean inputIsJava) {
+        validateAgentName(agentName);
         return (DataStream<OUT>)
                 keyedInputStream
                         .transform(
-                                "action-execute-operator",
+                                getOperatorName(agentName),
                                 outTypeInformation,
                                 new ActionExecutionOperatorFactory(agentPlan, inputIsJava))
+                        .uid(getCoordinatedOperatorUid(agentName))
                         .setParallelism(keyedInputStream.getParallelism());
+    }
+
+    private static final String COORDINATED_OPERATOR_UID_PREFIX =
+            "flink-agents-coordinated-operator:";
+
+    private static final String COORDINATED_OPERATOR_NAME_PREFIX =
+            "coordinated-action-execute-operator:";
+
+    public static void validateAgentName(String agentName) {
+        Preconditions.checkArgument(
+                agentName != null && !agentName.trim().isEmpty(),
+                "The agent name must not be blank.");
+    }
+
+    public static String getCoordinatedOperatorUid(String agentName) {
+        validateAgentName(agentName);
+        return COORDINATED_OPERATOR_UID_PREFIX + agentName;
+    }
+
+    private static String getOperatorName(String agentName) {
+        validateAgentName(agentName);
+        return COORDINATED_OPERATOR_NAME_PREFIX + agentName;
     }
 }

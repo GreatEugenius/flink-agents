@@ -41,7 +41,9 @@ class AgentBuilder(ABC):
     """Builder for integrating agent with input and output."""
 
     @abstractmethod
-    def apply(self, agent: "Agent | str") -> "AgentBuilder":
+    def apply(
+        self, agent: "Agent | str", name: str | None = None
+    ) -> "AgentBuilder":
         """Set agent of AgentBuilder.
 
         Parameters
@@ -49,6 +51,9 @@ class AgentBuilder(ABC):
         agent : Agent | str
             Either an Agent instance, or the name of an agent registered
             on the environment (e.g. by ``load_yaml``).
+        name : str, optional
+            Stable deployment name. Defaults to the Agent class name, or to
+            the registry name when ``agent`` is a string.
         """
 
     @abstractmethod

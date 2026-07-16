@@ -23,8 +23,11 @@ from unittest.mock import MagicMock, patch
 import pytest
 import yaml
 
+from flink_agents.api.agents.agent import Agent
+from flink_agents.api.resource import ResourceType
 from flink_agents.plan.configuration import AgentConfiguration
 from flink_agents.runtime.remote_execution_environment import (
+    RemoteAgentBuilder,
     RemoteExecutionEnvironment,
 )
 
@@ -218,6 +221,74 @@ def test_apply_by_unknown_name_errors() -> None:
 
     with pytest.raises(ValueError, match="ghost"):
         builder.apply("ghost")
+
+
+def test_apply_uses_agent_class_name_as_deployment_name() -> None:
+    """An Agent instance defaults its deployment identity to its class name."""
+    builder = _remote_agent_builder()
+
+    builder.apply(NamedAgent())
+
+    assert _compiled_agent_name(builder) == "NamedAgent"
+
+
+def test_apply_accepts_explicit_deployment_name() -> None:
+    """Users can keep a stable deployment identity across class renames."""
+    builder = _remote_agent_builder()
+
+    builder.apply(NamedAgent(), name="review-agent")
+
+    assert _compiled_agent_name(builder) == "review-agent"
+
+
+def test_apply_registered_agent_uses_registry_name() -> None:
+    """YAML/registry lookup names are also the deployed agent identity."""
+    builder = _remote_agent_builder(agents={"yaml-agent": NamedAgent()})
+
+    builder.apply("yaml-agent")
+
+    assert _compiled_agent_name(builder) == "yaml-agent"
+
+
+def test_apply_rejects_blank_deployment_name() -> None:
+    """Blank names cannot produce a stable operator UID."""
+    builder = _remote_agent_builder()
+
+    with pytest.raises(ValueError, match="agent name"):
+        builder.apply(NamedAgent(), name="  ")
+
+
+class NamedAgent(Agent):
+    """Agent with a deterministic default deployment name."""
+
+
+def _remote_agent_builder(
+    agents: dict[str, Agent] | None = None,
+) -> RemoteAgentBuilder:
+    input_stream = MagicMock()
+    input_stream._j_data_stream = MagicMock()
+    resources = {resource_type: {} for resource_type in ResourceType}
+    return RemoteAgentBuilder(
+        input=input_stream,
+        config=AgentConfiguration(),
+        resources=resources,
+        agents=agents,
+    )
+
+
+def _compiled_agent_name(builder: RemoteAgentBuilder) -> str:
+    wrapped_output = MagicMock()
+    with (
+        patch(
+            "flink_agents.runtime.remote_execution_environment.invoke_method"
+        ) as invoke,
+        patch(
+            "flink_agents.runtime.remote_execution_environment.DataStream",
+            return_value=wrapped_output,
+        ),
+    ):
+        builder.to_datastream()
+    return invoke.call_args.args[3][1]
 
 
 def _verify_config(config: AgentConfiguration) -> None:

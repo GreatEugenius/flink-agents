@@ -27,7 +27,7 @@ public final class PlanUpdateMessages {
     private PlanUpdateMessages() {}
 
     /**
-     * Coordinator → subtask: the plan to switch to. Carries the coordinator-minted sequence, the
+     * Coordinator → subtask: the plan to switch to. Carries the coordinator-minted planVersion, the
      * content signature, and the canonical plan JSON so subtasks can verify integrity and apply
      * duplicate backfills idempotently.
      */
@@ -55,8 +55,9 @@ public final class PlanUpdateMessages {
     }
 
     /**
-     * Coordinator → caller: the minted sequence and planId (for publish confirmation), plus how
-     * many subtasks the update was fanned out to.
+     * Coordinator → caller: the minted planVersion and planId for staging confirmation. The frozen
+     * {@code subtasksNotified} field records how many subtask gateways were registered when the
+     * request was accepted; the staged plan is not announced until a checkpoint completes.
      */
     public static final class PlanUpdateResponse implements CoordinationResponse {
         private static final long serialVersionUID = 2L;

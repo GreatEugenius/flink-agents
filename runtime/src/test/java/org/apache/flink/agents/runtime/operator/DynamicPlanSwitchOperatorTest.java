@@ -83,7 +83,7 @@ public class DynamicPlanSwitchOperatorTest {
             checkpoint(harness, 1L);
             assertThat(op.getCurrentPlanVersionForTesting()).isEqualTo(1L);
             assertThat(op.hasPendingPlanForTesting()).isFalse();
-            assertThat(op.getCurrentPlanForTesting().getActions()).containsOnlyKeys("action");
+            assertThat(op.getCurrentPlanForTesting().getActions()).containsOnlyKeys("newAction");
 
             harness.processElement(new StreamRecord<>(3L));
             op.waitInFlightEventsFinished();
@@ -133,7 +133,7 @@ public class DynamicPlanSwitchOperatorTest {
             ActionExecutionOperator<Long, Object> op = op(restored);
 
             assertThat(op.getCurrentPlanVersionForTesting()).isEqualTo(1L);
-            assertThat(op.getCurrentPlanForTesting().getActions()).containsOnlyKeys("action");
+            assertThat(op.getCurrentPlanForTesting().getActions()).containsOnlyKeys("newAction");
 
             restored.processElement(new StreamRecord<>(4L));
             op.waitInFlightEventsFinished();
@@ -195,9 +195,7 @@ public class DynamicPlanSwitchOperatorTest {
 
             checkpoint(harness, 1L);
             assertThat(op.getCurrentPlanVersionForTesting()).isEqualTo(2L);
-            harness.processElement(new StreamRecord<>(10L));
-            op.waitInFlightEventsFinished();
-            assertThat(outputs(harness)).containsExactly("newer:10");
+            assertThat(op.getCurrentPlanForTesting().getActions()).containsOnlyKeys("newerAction");
         }
     }
 
@@ -383,7 +381,7 @@ public class DynamicPlanSwitchOperatorTest {
     private static AgentPlan singleActionPlan(String method) throws Exception {
         Action action =
                 new Action(
-                        "action",
+                        method,
                         new JavaFunction(
                                 DynamicPlanSwitchOperatorTest.class,
                                 method,

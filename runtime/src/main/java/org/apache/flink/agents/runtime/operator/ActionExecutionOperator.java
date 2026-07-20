@@ -577,11 +577,14 @@ public class ActionExecutionOperator<IN, OUT> extends AbstractStreamOperator<OUT
         if (planManager.hasPending()) {
             waitInFlightEventsFinished();
 
+            AgentPlan previousPlan = planManager.currentPlan();
             AgentPlan nextPlan = planManager.pendingPlan();
 
             // Verify the content-addressed artifact again after drain and immediately before
             // dismantling the current runtime.
             planManager.validatePendingJavaArtifact();
+            pythonBridge.validatePythonPlanMetadata(nextPlan);
+            pythonBridge.validatePythonPlanTransition(previousPlan, nextPlan);
 
             // Runner contexts and ResourceCache may hold Python references. Quiesce the Python
             // executor, release the Java context, close Java-side resources while the old
@@ -620,6 +623,9 @@ public class ActionExecutionOperator<IN, OUT> extends AbstractStreamOperator<OUT
         }
         try {
             planManager.preparePending(event.planVersion, event.planId, event.canonicalPlanJson);
+            pythonBridge.validatePythonPlanMetadata(planManager.pendingPlan());
+            pythonBridge.validatePythonPlanTransition(
+                    planManager.currentPlan(), planManager.pendingPlan());
             LOG.info(
                     "Validated AgentPlan update with planVersion {}; activating at the next checkpoint barrier.",
                     event.planVersion);

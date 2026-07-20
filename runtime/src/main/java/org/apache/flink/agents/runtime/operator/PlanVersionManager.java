@@ -78,7 +78,11 @@ class PlanVersionManager {
 
     /** Update-carried config keys honored during the bootstrap-config merge. */
     private static final Set<String> PLAN_SCOPED_CONFIG_KEYS =
-            Set.of(JAVA_ARTIFACT_PATH_CONFIG, JAVA_ARTIFACT_SHA256_CONFIG);
+            Set.of(
+                    JAVA_ARTIFACT_PATH_CONFIG,
+                    JAVA_ARTIFACT_SHA256_CONFIG,
+                    PythonBridgeManager.PYTHON_ARTIFACT_PATH_CONFIG,
+                    PythonBridgeManager.PYTHON_ARTIFACT_SHA256_CONFIG);
 
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
@@ -313,7 +317,7 @@ class PlanVersionManager {
     /**
      * Job-level configuration is pinned at submission: the effective plan keeps the update's
      * actions/routing/resources but carries the bootstrap {@code AgentConfiguration}, except for
-     * artifact coordinates whose value belongs to a specific plan version.
+     * Java and Python artifact coordinates whose values belong to a specific plan version.
      */
     private AgentPlan withBootstrapConfig(AgentPlan received) {
         Map<String, Object> merged = new HashMap<>(bootstrapPlan.getConfig().getConfData());

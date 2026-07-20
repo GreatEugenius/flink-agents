@@ -43,7 +43,12 @@ import pemja.core.object.PyObject;
 
 import javax.annotation.Nullable;
 
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.HashMap;
+import java.util.Locale;
+import java.util.Objects;
+import java.util.zip.ZipFile;
 
 import static org.apache.flink.agents.plan.actions.Utils.requiredVersions;
 import static org.apache.flink.agents.plan.actions.Utils.supportAsync;
@@ -76,6 +81,9 @@ import static org.apache.flink.agents.plan.actions.Utils.supportAsync;
 class PythonBridgeManager implements AutoCloseable {
 
     private static final Logger LOG = LoggerFactory.getLogger(PythonBridgeManager.class);
+
+    static final String PYTHON_ARTIFACT_PATH_CONFIG = "dynamic-plan.python-artifact.path";
+    static final String PYTHON_ARTIFACT_SHA256_CONFIG = "dynamic-plan.python-artifact.sha256";
 
     private PythonEnvironmentManager pythonEnvironmentManager;
     @Nullable private PlanPythonRuntime activeRuntime;
@@ -144,6 +152,7 @@ class PythonBridgeManager implements AutoCloseable {
         this.mailboxThreadChecker = mailboxThreadChecker;
         this.jobIdentifier = jobIdentifier;
 
+        validatePythonPlanMetadata(agentPlan);
         activeRuntime = createPlanRuntime(agentPlan, resourceCache, planClassLoader);
     }
 
@@ -258,6 +267,109 @@ class PythonBridgeManager implements AutoCloseable {
                 || containsPythonAction(agentPlan)
                 || containsPythonResource(agentPlan)
                 || isMem0Configured(agentPlan);
+    }
+
+    /** Validates plan-scoped Python artifact metadata without starting or mutating CPython. */
+    void validatePythonPlanMetadata(AgentPlan agentPlan) throws Exception {
+        if (!needsPythonRuntime(agentPlan)) {
+            return;
+        }
+
+        String artifactPath = normalizedConfigValue(agentPlan, PYTHON_ARTIFACT_PATH_CONFIG);
+        String expectedSha256 = normalizedConfigValue(agentPlan, PYTHON_ARTIFACT_SHA256_CONFIG);
+        org.apache.flink.util.Preconditions.checkState(
+                (artifactPath == null) == (expectedSha256 == null),
+                "%s and %s must be configured together.",
+                PYTHON_ARTIFACT_PATH_CONFIG,
+                PYTHON_ARTIFACT_SHA256_CONFIG);
+        if (artifactPath == null) {
+            return;
+        }
+
+        Path path = Path.of(artifactPath);
+        org.apache.flink.util.Preconditions.checkState(
+                Files.isRegularFile(path),
+                "Python artifact path %s must be a regular file.",
+                artifactPath);
+        org.apache.flink.util.Preconditions.checkState(
+                expectedSha256.matches("(?i)[0-9a-f]{64}"),
+                "%s must contain exactly 64 hexadecimal characters.",
+                PYTHON_ARTIFACT_SHA256_CONFIG);
+        String actual =
+                org.apache.flink.agents.runtime.operator.coordinator.PlanIds.sha256HexOfFile(path);
+        org.apache.flink.util.Preconditions.checkState(
+                actual.equalsIgnoreCase(expectedSha256),
+                "Python artifact %s failed sha256 verification: expected %s but was %s.",
+                artifactPath,
+                expectedSha256,
+                actual);
+        try (ZipFile ignored = new ZipFile(path.toFile())) {
+            // Opening the archive validates its central directory without importing user code.
+        } catch (Exception e) {
+            throw new IllegalStateException(
+                    String.format(
+                            "Python artifact %s must be a valid zip or wheel archive.",
+                            artifactPath),
+                    e);
+        }
+    }
+
+    /** Rejects replacement of one Python artifact path with different contents. */
+    void validatePythonPlanTransition(AgentPlan currentPlan, AgentPlan newPlan) {
+        if (!needsPythonRuntime(currentPlan) && !needsPythonRuntime(newPlan)) {
+            return;
+        }
+
+        String currentArtifactPath =
+                normalizedConfiguredPath(currentPlan, PYTHON_ARTIFACT_PATH_CONFIG);
+        String newArtifactPath = normalizedConfiguredPath(newPlan, PYTHON_ARTIFACT_PATH_CONFIG);
+        if (sameConfiguredPath(currentArtifactPath, newArtifactPath)) {
+            String currentSha = normalizedSha(currentPlan);
+            String newSha = normalizedSha(newPlan);
+            org.apache.flink.util.Preconditions.checkState(
+                    Objects.equals(currentSha, newSha),
+                    "%s is immutable; use a new path for a different digest: %s.",
+                    PYTHON_ARTIFACT_PATH_CONFIG,
+                    currentArtifactPath);
+        }
+    }
+
+    @Nullable
+    private static String normalizedConfiguredPath(AgentPlan plan, String key) {
+        String configured = normalizedConfigValue(plan, key);
+        if (configured == null) {
+            return null;
+        }
+        Path path = Path.of(configured);
+        try {
+            return path.toRealPath().toString();
+        } catch (Exception ignored) {
+            return path.toAbsolutePath().normalize().toString();
+        }
+    }
+
+    private static boolean sameConfiguredPath(
+            @Nullable String currentPath, @Nullable String newPath) {
+        if (currentPath == null || newPath == null) {
+            return false;
+        }
+        try {
+            return Files.isSameFile(Path.of(currentPath), Path.of(newPath));
+        } catch (Exception ignored) {
+            return currentPath.equals(newPath);
+        }
+    }
+
+    @Nullable
+    private static String normalizedSha(AgentPlan plan) {
+        String sha = normalizedConfigValue(plan, PYTHON_ARTIFACT_SHA256_CONFIG);
+        return sha == null ? null : sha.toLowerCase(Locale.ROOT);
+    }
+
+    @Nullable
+    private static String normalizedConfigValue(AgentPlan plan, String key) {
+        String configured = plan.getConfig().getStr(key, null);
+        return configured == null || configured.trim().isEmpty() ? null : configured.trim();
     }
 
     /**

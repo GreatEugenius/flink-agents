@@ -59,6 +59,8 @@ import java.util.Map;
 import java.util.jar.JarEntry;
 import java.util.jar.JarOutputStream;
 import java.util.stream.Collectors;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipOutputStream;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -526,6 +528,26 @@ public class DynamicPlanSwitchOperatorTest {
     }
 
     @Test
+    void pythonArtifactTamperedAfterPrepareFailsAtTheActivationBarrier(@TempDir Path tempDir)
+            throws Exception {
+        Path artifact = writePythonArtifact(tempDir.resolve("agent-v2.zip"));
+
+        try (KeyedOneInputStreamOperatorTestHarness<Long, Long, Object> harness =
+                harness(pythonPlan("old_action"))) {
+            harness.open();
+            ActionExecutionOperator<Long, Object> op = op(harness);
+
+            op.handleOperatorEvent(planUpdate(1L, json(pythonArtifactPlan(artifact))));
+            assertThat(op.hasPendingPlanForTesting()).isTrue();
+            Files.writeString(artifact, "tampered after prepare");
+
+            assertThatThrownBy(() -> checkpoint(harness, 1L))
+                    .hasMessageContaining("failed sha256 verification")
+                    .hasMessageContaining(artifact.toString());
+        }
+    }
+
+    @Test
     void existingPythonActionCanSwitchWithoutAnArtifact() throws Exception {
         try (KeyedOneInputStreamOperatorTestHarness<Long, Long, Object> harness =
                 harness(pythonPlan("old_action"))) {
@@ -738,6 +760,17 @@ public class DynamicPlanSwitchOperatorTest {
                 config);
     }
 
+    private static AgentPlan pythonArtifactPlan(Path artifact) throws Exception {
+        AgentPlan plan = pythonPlan("new_action");
+        plan.getConfig()
+                .setStr(PythonBridgeManager.PYTHON_ARTIFACT_PATH_CONFIG, artifact.toString());
+        plan.getConfig()
+                .setStr(
+                        PythonBridgeManager.PYTHON_ARTIFACT_SHA256_CONFIG,
+                        PlanIds.sha256HexOfFile(artifact));
+        return plan;
+    }
+
     private static AgentPlan javaArtifactPlan(Path artifactPath) throws Exception {
         AgentPlan plan = singleActionPlan("newAction");
         configureJavaArtifact(plan, artifactPath);
@@ -846,6 +879,15 @@ public class DynamicPlanSwitchOperatorTest {
             jar.putNextEntry(new JarEntry("marker.txt"));
             jar.write(marker.getBytes(StandardCharsets.UTF_8));
             jar.closeEntry();
+        }
+        return artifact;
+    }
+
+    private static Path writePythonArtifact(Path artifact) throws Exception {
+        try (ZipOutputStream zip = new ZipOutputStream(Files.newOutputStream(artifact))) {
+            zip.putNextEntry(new ZipEntry("app/agent.py"));
+            zip.write("def handle(value):\n    return value\n".getBytes(StandardCharsets.UTF_8));
+            zip.closeEntry();
         }
         return artifact;
     }

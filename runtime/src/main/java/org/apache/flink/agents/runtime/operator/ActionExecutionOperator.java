@@ -29,11 +29,14 @@ import org.apache.flink.agents.runtime.actionstate.ActionState;
 import org.apache.flink.agents.runtime.actionstate.ActionStateStore;
 import org.apache.flink.agents.runtime.metrics.BuiltInMetrics;
 import org.apache.flink.agents.runtime.metrics.FlinkAgentsMetricGroupImpl;
+import org.apache.flink.agents.runtime.operator.coordinator.PlanUpdateMessages.PlanUpdateEvent;
 import org.apache.flink.agents.runtime.python.operator.PythonActionTask;
 import org.apache.flink.agents.runtime.python.utils.PythonActionExecutor;
 import org.apache.flink.agents.runtime.utils.EventUtil;
 import org.apache.flink.annotation.VisibleForTesting;
 import org.apache.flink.api.common.operators.MailboxExecutor;
+import org.apache.flink.runtime.operators.coordination.OperatorEvent;
+import org.apache.flink.runtime.operators.coordination.OperatorEventHandler;
 import org.apache.flink.runtime.state.KeyGroupRange;
 import org.apache.flink.runtime.state.StateInitializationContext;
 import org.apache.flink.runtime.state.StateSnapshotContext;
@@ -74,7 +77,7 @@ import static org.apache.flink.util.Preconditions.checkState;
  * and the resulting output event is collected for further processing.
  */
 public class ActionExecutionOperator<IN, OUT> extends AbstractStreamOperator<OUT>
-        implements OneInputStreamOperator<IN, OUT>, BoundedOneInput {
+        implements OneInputStreamOperator<IN, OUT>, BoundedOneInput, OperatorEventHandler {
 
     private static final long serialVersionUID = 1L;
 
@@ -558,6 +561,46 @@ public class ActionExecutionOperator<IN, OUT> extends AbstractStreamOperator<OUT
         planManager.snapshotState();
 
         super.snapshotState(context);
+    }
+
+    /**
+     * Receives and prepares a plan update on the mailbox thread. Duplicate and stale deliveries are
+     * ignored. A rejected candidate fails this attempt so every subtask recovers from the same
+     * completed checkpoint instead of continuing with different local candidates.
+     */
+    @Override
+    public void handleOperatorEvent(OperatorEvent evt) {
+        checkState(
+                evt instanceof PlanUpdateEvent,
+                "Unexpected operator event: " + evt.getClass().getName());
+        PlanUpdateEvent event = (PlanUpdateEvent) evt;
+        if (!planManager.isNewerThanKnown(event.planVersion)) {
+            LOG.info(
+                    "Ignoring AgentPlan update with planVersion {} (already at planVersion {}).",
+                    event.planVersion,
+                    planManager.currentPlanVersion());
+            return;
+        }
+        try {
+            planManager.preparePending(event.planVersion, event.planId, event.canonicalPlanJson);
+            LOG.info(
+                    "Validated AgentPlan update with planVersion {}; activating at the next checkpoint barrier.",
+                    event.planVersion);
+        } catch (Exception e) {
+            builtInMetrics.markDynamicPlanUpdateRejected();
+            LOG.warn(
+                    "Rejected AgentPlan update with planVersion {}; failing the attempt so all "
+                            + "subtasks recover from the current plan (planVersion {}).",
+                    event.planVersion,
+                    planManager.currentPlanVersion(),
+                    e);
+            try {
+                planManager.discardPending();
+            } catch (Exception cleanupFailure) {
+                e.addSuppressed(cleanupFailure);
+            }
+            ExceptionUtils.rethrow(e);
+        }
     }
 
     @Override

@@ -21,7 +21,8 @@ package org.apache.flink.agents.runtime;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.flink.agents.plan.AgentPlan;
-import org.apache.flink.agents.runtime.operator.ActionExecutionOperatorFactory;
+import org.apache.flink.agents.runtime.operator.CoordinatedActionExecutionOperatorFactory;
+import org.apache.flink.annotation.VisibleForTesting;
 import org.apache.flink.api.common.typeinfo.TypeInformation;
 import org.apache.flink.api.java.functions.KeySelector;
 import org.apache.flink.streaming.api.datastream.DataStream;
@@ -81,15 +82,8 @@ public class CompileUtils {
             AgentPlan agentPlan,
             TypeInformation<OUT> outTypeInformation,
             boolean inputIsJava) {
-        validateAgentName(agentName);
-        return (DataStream<OUT>)
-                keyedInputStream
-                        .transform(
-                                getOperatorName(agentName),
-                                outTypeInformation,
-                                new ActionExecutionOperatorFactory(agentPlan, inputIsJava))
-                        .uid(getCoordinatedOperatorUid(agentName))
-                        .setParallelism(keyedInputStream.getParallelism());
+        return coordinatedConnect(
+                keyedInputStream, agentName, agentPlan, outTypeInformation, inputIsJava);
     }
 
     private static final String COORDINATED_OPERATOR_UID_PREFIX =
@@ -109,8 +103,41 @@ public class CompileUtils {
         return COORDINATED_OPERATOR_UID_PREFIX + agentName;
     }
 
-    private static String getOperatorName(String agentName) {
+    private static String getCoordinatedOperatorName(String agentName) {
         validateAgentName(agentName);
         return COORDINATED_OPERATOR_NAME_PREFIX + agentName;
+    }
+
+    /**
+     * The only wiring: the agent operator is always coordinated, so every job can receive plan
+     * updates as OperatorEvents from the JM-side coordinator without opting in. Each deployment
+     * gets a stable uid derived from its agent name; {@code AgentPlanClient} uses that same name to
+     * address exactly one coordinator. Jobs built with releases before this feature keep running on
+     * their release; upgrading changes the operator uid and therefore requires a fresh start (no
+     * state compatibility is provided).
+     */
+    private static <K, IN, OUT> DataStream<OUT> coordinatedConnect(
+            KeyedStream<IN, K> keyedInputStream,
+            String agentName,
+            AgentPlan agentPlan,
+            TypeInformation<OUT> outTypeInformation,
+            boolean inputIsJava) {
+        validateAgentName(agentName);
+        return (DataStream<OUT>)
+                keyedInputStream
+                        .transform(
+                                getCoordinatedOperatorName(agentName),
+                                outTypeInformation,
+                                new CoordinatedActionExecutionOperatorFactory<>(
+                                        agentPlan, inputIsJava))
+                        .uid(getCoordinatedOperatorUid(agentName))
+                        .setParallelism(keyedInputStream.getParallelism());
+    }
+
+    @VisibleForTesting
+    public static <IN, K> DataStream<Object> connectToAgentWithCoordinator(
+            KeyedStream<IN, K> keyedInputStream, String agentName, AgentPlan agentPlan) {
+        return coordinatedConnect(
+                keyedInputStream, agentName, agentPlan, TypeInformation.of(Object.class), true);
     }
 }

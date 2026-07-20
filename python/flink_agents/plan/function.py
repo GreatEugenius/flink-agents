@@ -314,7 +314,15 @@ class JavaFunction(Function):
             raise TypeError(msg)
 
 
-def call_python_function(module: str, qualname: str, func_args: Tuple[Any, ...]) -> Any:
+def resolve_python_function(module: str, qualname: str) -> None:
+    """Import and resolve one declared action without executing it."""
+    python_func = PythonFunction(module=module, qualname=qualname)
+    python_func.as_callable()
+
+
+def call_python_function(
+    module: str, qualname: str, func_args: Tuple[Any, ...]
+) -> Any:
     """Used to call a Python function in the Pemja environment.
 
     Uses selective caching to reuse PythonFunction instances for identical

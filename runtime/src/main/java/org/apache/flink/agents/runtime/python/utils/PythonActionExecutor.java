@@ -35,38 +35,51 @@ import static org.apache.flink.util.Preconditions.checkState;
 /** Execute the corresponding Python action in the agent. */
 public class PythonActionExecutor {
 
+    private static final String FUNCTION_MODULE = "__fa_function_module";
+    private static final String RUNNER_CONTEXT_MODULE = "__fa_runner_context_module";
+    private static final String JAVA_UTILS_MODULE = "__fa_java_utils_module";
     private static final String PYTHON_IMPORTS =
-            "from flink_agents.plan import function\n"
-                    + "from flink_agents.runtime import flink_runner_context\n"
-                    + "from flink_agents.runtime import python_java_utils";
+            "from flink_agents.plan import function as "
+                    + FUNCTION_MODULE
+                    + "\n"
+                    + "from flink_agents.runtime import flink_runner_context as "
+                    + RUNNER_CONTEXT_MODULE
+                    + "\n"
+                    + "from flink_agents.runtime import python_java_utils as "
+                    + JAVA_UTILS_MODULE
+                    + "\n"
+                    + "function = "
+                    + FUNCTION_MODULE
+                    + "\n"
+                    + "flink_runner_context = "
+                    + RUNNER_CONTEXT_MODULE
+                    + "\n"
+                    + "python_java_utils = "
+                    + JAVA_UTILS_MODULE
+                    + "\n";
 
     // =========== RUNNER CONTEXT ===========
-    private static final String CREATE_FLINK_RUNNER_CONTEXT =
-            "flink_runner_context.create_flink_runner_context";
+    private static final String CREATE_FLINK_RUNNER_CONTEXT = "create_flink_runner_context";
 
     private static final String FLINK_RUNNER_CONTEXT_SWITCH_ACTION_CONTEXT =
-            "flink_runner_context.flink_runner_context_switch_action_context";
+            "flink_runner_context_switch_action_context";
 
-    private static final String CLOSE_FLINK_RUNNER_CONTEXT =
-            "flink_runner_context.close_flink_runner_context";
+    private static final String CLOSE_FLINK_RUNNER_CONTEXT = "close_flink_runner_context";
 
     // ========== ASYNC THREAD POOL ===========
-    private static final String CREATE_ASYNC_THREAD_POOL =
-            "flink_runner_context.create_async_thread_pool";
-    private static final String CLOSE_ASYNC_THREAD_POOL =
-            "flink_runner_context.close_async_thread_pool";
+    private static final String CREATE_ASYNC_THREAD_POOL = "create_async_thread_pool";
+    private static final String CLOSE_ASYNC_THREAD_POOL = "close_async_thread_pool";
 
     // =========== PYTHON AWAITABLE ===========
-    private static final String CALL_PYTHON_AWAITABLE = "function.call_python_awaitable";
+    private static final String RESOLVE_PYTHON_FUNCTION = "resolve_python_function";
+    private static final String CALL_PYTHON_AWAITABLE = "call_python_awaitable";
     private static final String PYTHON_AWAITABLE_VAR_NAME_PREFIX = "python_awaitable_";
     private static final AtomicLong PYTHON_AWAITABLE_VAR_ID = new AtomicLong(0);
 
     // =========== PYTHON AND JAVA OBJECT CONVERT ===========
-    private static final String CONVERT_JSON_TO_PYTHON_EVENT =
-            "python_java_utils.convert_json_to_python_event";
-    private static final String WRAP_TO_INPUT_EVENT = "python_java_utils.wrap_to_input_event";
-    private static final String GET_OUTPUT_FROM_OUTPUT_EVENT =
-            "python_java_utils.get_output_from_output_event";
+    private static final String CONVERT_JSON_TO_PYTHON_EVENT = "convert_json_to_python_event";
+    private static final String WRAP_TO_INPUT_EVENT = "wrap_to_input_event";
+    private static final String GET_OUTPUT_FROM_OUTPUT_EVENT = "get_output_from_output_event";
 
     private final PythonInterpreter interpreter;
     private final AgentPlan agentPlan;
@@ -96,22 +109,47 @@ public class PythonActionExecutor {
 
     public void open() throws Exception {
         interpreter.exec(PYTHON_IMPORTS);
+        resolveDeclaredPythonActions();
 
         pythonAsyncThreadPool =
                 (PyObject)
-                        interpreter.invoke(
+                        interpreter.invokeMethod(
+                                RUNNER_CONTEXT_MODULE,
                                 CREATE_ASYNC_THREAD_POOL,
                                 agentPlan.getConfig().get(AgentExecutionOptions.NUM_ASYNC_THREADS));
 
         pythonRunnerContext =
                 (PyObject)
-                        interpreter.invoke(
+                        interpreter.invokeMethod(
+                                RUNNER_CONTEXT_MODULE,
                                 CREATE_FLINK_RUNNER_CONTEXT,
                                 runnerContext,
                                 new ObjectMapper().writeValueAsString(agentPlan),
                                 pythonAsyncThreadPool,
                                 javaResourceAdapter,
                                 jobIdentifier);
+    }
+
+    private void resolveDeclaredPythonActions() {
+        for (org.apache.flink.agents.plan.actions.Action action : agentPlan.getActions().values()) {
+            if (!(action.getExec() instanceof PythonFunction)) {
+                continue;
+            }
+            PythonFunction function = (PythonFunction) action.getExec();
+            try {
+                interpreter.invokeMethod(
+                        FUNCTION_MODULE,
+                        RESOLVE_PYTHON_FUNCTION,
+                        function.getModule(),
+                        function.getQualName());
+            } catch (Exception e) {
+                throw new IllegalStateException(
+                        String.format(
+                                "Could not resolve Python action %s.%s.",
+                                function.getModule(), function.getQualName()),
+                        e);
+            }
+        }
     }
 
     /**
@@ -128,12 +166,18 @@ public class PythonActionExecutor {
             throws Exception {
         runnerContext.checkNoPendingEvents();
         function.setInterpreter(interpreter);
+        function.setInvocationModule(FUNCTION_MODULE);
 
-        interpreter.invoke(
-                FLINK_RUNNER_CONTEXT_SWITCH_ACTION_CONTEXT, pythonRunnerContext, hashOfKey);
+        interpreter.invokeMethod(
+                RUNNER_CONTEXT_MODULE,
+                FLINK_RUNNER_CONTEXT_SWITCH_ACTION_CONTEXT,
+                pythonRunnerContext,
+                hashOfKey);
 
         String eventJson = new ObjectMapper().writeValueAsString(event);
-        Object pythonEventObject = interpreter.invoke(CONVERT_JSON_TO_PYTHON_EVENT, eventJson);
+        Object pythonEventObject =
+                interpreter.invokeMethod(
+                        JAVA_UTILS_MODULE, CONVERT_JSON_TO_PYTHON_EVENT, eventJson);
 
         try {
             Object calledResult = function.call(pythonEventObject, pythonRunnerContext);
@@ -156,13 +200,13 @@ public class PythonActionExecutor {
     public Event wrapToInputEvent(Object eventData) throws IOException {
         checkState(eventData instanceof byte[]);
         // wrap_to_input_event returns a JSON string
-        Object result = interpreter.invoke(WRAP_TO_INPUT_EVENT, eventData);
+        Object result = interpreter.invokeMethod(JAVA_UTILS_MODULE, WRAP_TO_INPUT_EVENT, eventData);
         checkState(result instanceof String);
         return Event.fromJson((String) result);
     }
 
     public Object getOutputFromOutputEvent(String eventJson) {
-        return interpreter.invoke(GET_OUTPUT_FROM_OUTPUT_EVENT, eventJson);
+        return interpreter.invokeMethod(JAVA_UTILS_MODULE, GET_OUTPUT_FROM_OUTPUT_EVENT, eventJson);
     }
 
     /**
@@ -182,7 +226,8 @@ public class PythonActionExecutor {
                 pythonAwaitable != null,
                 "Python awaitable '%s' not found in interpreter. ",
                 pythonAwaitableRef);
-        Object invokeResult = interpreter.invoke(CALL_PYTHON_AWAITABLE, pythonAwaitable);
+        Object invokeResult =
+                interpreter.invokeMethod(FUNCTION_MODULE, CALL_PYTHON_AWAITABLE, pythonAwaitable);
         checkState(invokeResult.getClass().isArray() && ((Object[]) invokeResult).length == 2);
         return (boolean) ((Object[]) invokeResult)[0];
     }
@@ -190,12 +235,14 @@ public class PythonActionExecutor {
     public void close() throws Exception {
         if (interpreter != null) {
             if (pythonAsyncThreadPool != null) {
-                interpreter.invoke(CLOSE_ASYNC_THREAD_POOL, pythonAsyncThreadPool);
+                interpreter.invokeMethod(
+                        RUNNER_CONTEXT_MODULE, CLOSE_ASYNC_THREAD_POOL, pythonAsyncThreadPool);
             }
 
             if (pythonRunnerContext != null) {
                 try {
-                    interpreter.invoke(CLOSE_FLINK_RUNNER_CONTEXT, pythonRunnerContext);
+                    interpreter.invokeMethod(
+                            RUNNER_CONTEXT_MODULE, CLOSE_FLINK_RUNNER_CONTEXT, pythonRunnerContext);
                 } finally {
                     pythonRunnerContext = null;
                 }

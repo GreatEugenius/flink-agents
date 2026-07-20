@@ -18,6 +18,7 @@
 package org.apache.flink.agents.runtime.operator;
 
 import org.apache.flink.agents.api.InputEvent;
+import org.apache.flink.agents.plan.AgentConfiguration;
 import org.apache.flink.agents.plan.AgentPlan;
 import org.apache.flink.agents.plan.actions.Action;
 import org.apache.flink.agents.runtime.ResourceCache;
@@ -222,6 +223,42 @@ class ActionTaskContextManagerTest {
         mgr.close();
     }
 
+    @Test
+    void resetForPlanSwitchReleasesTheOldRunnerContext() throws Exception {
+        try (ActionTaskContextManager mgr = new ActionTaskContextManager(1)) {
+            AgentPlan oldPlan = planWithMarker("old");
+            AgentPlan newPlan = planWithMarker("new");
+            ResourceCache oldCache = mock(ResourceCache.class);
+            ResourceCache newCache = mock(ResourceCache.class);
+
+            RunnerContextImpl oldContext =
+                    mgr.createOrGetRunnerContext(
+                            true,
+                            oldPlan,
+                            oldCache,
+                            mock(FlinkAgentsMetricGroupImpl.class, RETURNS_DEEP_STUBS),
+                            "job",
+                            () -> {},
+                            null,
+                            null);
+
+            mgr.resetForPlanSwitch();
+
+            RunnerContextImpl newContext =
+                    mgr.createOrGetRunnerContext(
+                            true,
+                            newPlan,
+                            newCache,
+                            mock(FlinkAgentsMetricGroupImpl.class, RETURNS_DEEP_STUBS),
+                            "job",
+                            () -> {},
+                            null,
+                            null);
+            assertThat(newContext).isNotSameAs(oldContext);
+            assertThat(newContext.getConfig().getStr("plan-marker", null)).isEqualTo("new");
+        }
+    }
+
     /**
      * Shared helper: install a runner context on {@code task} using mocked collaborators. Used by
      * tests that need a fully wired runner context but do not care about the collaborator details.
@@ -251,5 +288,11 @@ class ActionTaskContextManagerTest {
 
     private static AgentPlan newEmptyAgentPlan() {
         return new AgentPlan(new HashMap<>(), new HashMap<>());
+    }
+
+    private static AgentPlan planWithMarker(String marker) {
+        AgentConfiguration config = new AgentConfiguration();
+        config.setStr("plan-marker", marker);
+        return new AgentPlan(new HashMap<>(), new HashMap<>(), new HashMap<>(), config);
     }
 }

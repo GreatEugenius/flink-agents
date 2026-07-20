@@ -564,6 +564,38 @@ public class ActionExecutionOperator<IN, OUT> extends AbstractStreamOperator<OUT
     }
 
     /**
+     * Activates a pending plan at the checkpoint barrier. The barrier first drains every event
+     * chain admitted under the old plan, then rebuilds all plan-scoped runtime objects and switches
+     * the live plan. The snapshot taken immediately afterwards therefore contains the new plan and
+     * no in-flight work from the old one.
+     *
+     * <p>The drain is deliberately unbounded. A local timeout could make subtasks switch at
+     * different checkpoints; holding the barrier instead preserves the global checkpoint boundary
+     * and lets Flink's checkpoint timeout decide whether the attempt should fail.
+     */
+    @Override
+    public void prepareSnapshotPreBarrier(long checkpointId) throws Exception {
+        if (planManager.hasPending()) {
+            waitInFlightEventsFinished();
+
+            AgentPlan nextPlan = planManager.pendingPlan();
+
+            // Runner contexts and ResourceCache may hold Python references. Quiesce the Python
+            // executor, release the Java context, close Java-side resources while the old
+            // interpreter is still alive, and only then construct the next runtime. No input can
+            // run in this interval because the checkpoint barrier is holding the task.
+            pythonBridge.quiescePlan();
+            durableExecManager.checkNoInFlightActionContexts();
+            contextManager.resetForPlanSwitch();
+            planManager.closeCurrentResourcesForSwitch();
+            pythonBridge.activatePlan(nextPlan, planManager.pendingResourceCache());
+
+            planManager.switchToPending();
+        }
+        super.prepareSnapshotPreBarrier(checkpointId);
+    }
+
+    /**
      * Receives and prepares a plan update on the mailbox thread. Duplicate and stale deliveries are
      * ignored. A rejected candidate fails this attempt so every subtask recovers from the same
      * completed checkpoint instead of continuing with different local candidates.

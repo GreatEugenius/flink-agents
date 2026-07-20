@@ -86,6 +86,7 @@ public class PythonActionExecutor {
     private final PythonRunnerContextImpl runnerContext;
     private final JavaResourceAdapter javaResourceAdapter;
     private final String jobIdentifier;
+    private final String moduleNamespace;
     private PyObject pythonAsyncThreadPool;
     private PyObject pythonRunnerContext;
 
@@ -94,13 +95,15 @@ public class PythonActionExecutor {
             AgentPlan agentPlan,
             JavaResourceAdapter javaResourceAdapter,
             PythonRunnerContextImpl runnerContext,
-            String jobIdentifier)
+            String jobIdentifier,
+            String moduleNamespace)
             throws JsonProcessingException {
         this.interpreter = interpreter;
         this.agentPlan = agentPlan;
         this.runnerContext = runnerContext;
         this.javaResourceAdapter = javaResourceAdapter;
         this.jobIdentifier = jobIdentifier;
+        this.moduleNamespace = moduleNamespace;
     }
 
     public PyObject getPythonRunnerContext() {
@@ -127,7 +130,8 @@ public class PythonActionExecutor {
                                 new ObjectMapper().writeValueAsString(agentPlan),
                                 pythonAsyncThreadPool,
                                 javaResourceAdapter,
-                                jobIdentifier);
+                                jobIdentifier,
+                                moduleNamespace);
     }
 
     private void resolveDeclaredPythonActions() {
@@ -141,7 +145,8 @@ public class PythonActionExecutor {
                         FUNCTION_MODULE,
                         RESOLVE_PYTHON_FUNCTION,
                         function.getModule(),
-                        function.getQualName());
+                        function.getQualName(),
+                        moduleNamespace);
             } catch (Exception e) {
                 throw new IllegalStateException(
                         String.format(
@@ -167,6 +172,7 @@ public class PythonActionExecutor {
         runnerContext.checkNoPendingEvents();
         function.setInterpreter(interpreter);
         function.setInvocationModule(FUNCTION_MODULE);
+        function.setModuleNamespace(moduleNamespace);
 
         interpreter.invokeMethod(
                 RUNNER_CONTEXT_MODULE,

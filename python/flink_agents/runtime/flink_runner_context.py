@@ -38,6 +38,7 @@ from flink_agents.api.runner_context import (
     AsyncExecutionResult,
     RunnerContext,
 )
+from flink_agents.plan.function import bind_python_module_namespace
 from flink_agents.runtime.durable_execution import (
     _compute_args_digest,
     _compute_function_id,
@@ -257,6 +258,7 @@ class FlinkRunnerContext(RunnerContext):
         agent_plan_json: str,
         executor: ThreadPoolExecutor,
         j_resource_adapter: Any,
+        module_namespace: str | None = None,
     ) -> None:
         """Initialize a flink runner context with the given java runner context.
 
@@ -268,7 +270,8 @@ class FlinkRunnerContext(RunnerContext):
         from flink_agents.plan.agent_plan import AgentPlan
 
         self._j_runner_context = j_runner_context
-        self.__agent_plan = AgentPlan.model_validate_json(agent_plan_json)
+        with bind_python_module_namespace(module_namespace):
+            self.__agent_plan = AgentPlan.model_validate_json(agent_plan_json)
         self.__resource_cache = ResourceCache(
             self.__agent_plan.resource_providers, self.__agent_plan.config
         )
@@ -768,10 +771,15 @@ def create_flink_runner_context(
     executor: ThreadPoolExecutor,
     j_resource_adapter: Any,
     job_identifier: str,
+    module_namespace: str | None = None,
 ) -> FlinkRunnerContext:
     """Used to create a FlinkRunnerContext Python object in Pemja environment."""
     ctx = FlinkRunnerContext(
-        j_runner_context, agent_plan_json, executor, j_resource_adapter
+        j_runner_context,
+        agent_plan_json,
+        executor,
+        j_resource_adapter,
+        module_namespace,
     )
     ltm = _init_long_term_memory(ctx, job_identifier)
     if ltm is not None:

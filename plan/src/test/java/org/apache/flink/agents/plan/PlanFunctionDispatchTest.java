@@ -82,6 +82,26 @@ class PlanFunctionDispatchTest {
     }
 
     @Test
+    void pythonFunctionDispatchIncludesPlanModuleNamespaceWhenConfigured() throws Exception {
+        PythonInterpreter interpreter = mock(PythonInterpreter.class);
+        PythonFunction fn = new PythonFunction("app.agent", "handle");
+        fn.setInterpreter(interpreter);
+        fn.setInvocationModule("__fa_function_module");
+        fn.setModuleNamespace("__fa_job_operator_v2");
+
+        fn.call("event");
+
+        verify(interpreter)
+                .invokeMethod(
+                        "__fa_function_module",
+                        "call_python_function",
+                        "app.agent",
+                        "handle",
+                        new Object[] {"event"},
+                        "__fa_job_operator_v2");
+    }
+
+    @Test
     void pythonFunctionCheckSignatureIsLazyNoOpForAnyArity() throws Exception {
         PythonFunction fn = new PythonFunction("test.module", "test_handler");
 

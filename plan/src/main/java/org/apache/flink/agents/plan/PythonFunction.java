@@ -30,6 +30,7 @@ public class PythonFunction implements Function {
 
     private transient PythonInterpreter interpreter;
     private transient String invocationModule;
+    private transient String moduleNamespace;
 
     public PythonFunction(String module, String qualName) {
         this.module = module;
@@ -42,6 +43,10 @@ public class PythonFunction implements Function {
 
     public void setInvocationModule(String invocationModule) {
         this.invocationModule = invocationModule;
+    }
+
+    public void setModuleNamespace(String moduleNamespace) {
+        this.moduleNamespace = moduleNamespace;
     }
 
     @Override
@@ -59,8 +64,12 @@ public class PythonFunction implements Function {
                             + "descriptor. The runtime injects it before invocation.");
         }
 
+        if (moduleNamespace == null) {
+            return interpreter.invokeMethod(
+                    invocationModule, CALL_PYTHON_FUNCTION, module, qualName, args);
+        }
         return interpreter.invokeMethod(
-                invocationModule, CALL_PYTHON_FUNCTION, module, qualName, args);
+                invocationModule, CALL_PYTHON_FUNCTION, module, qualName, args, moduleNamespace);
     }
 
     @Override

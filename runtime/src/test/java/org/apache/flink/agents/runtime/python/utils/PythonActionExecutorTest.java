@@ -17,12 +17,16 @@
  */
 package org.apache.flink.agents.runtime.python.utils;
 
+import org.apache.flink.agents.api.InputEvent;
 import org.apache.flink.agents.plan.AgentPlan;
+import org.apache.flink.agents.plan.PythonFunction;
+import org.apache.flink.agents.plan.actions.Action;
 import org.apache.flink.agents.runtime.python.context.PythonRunnerContextImpl;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import pemja.core.PythonInterpreter;
 
+import java.util.List;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -63,13 +67,44 @@ class PythonActionExecutorTest {
                 .doesNotContain("sys.modules[");
     }
 
+    @Test
+    void openResolvesDeclaredActionsInsidePlanNamespace() throws Exception {
+        PythonInterpreter interpreter = mock(PythonInterpreter.class);
+        Action action =
+                new Action(
+                        "python-action",
+                        new PythonFunction("app.agent", "handle"),
+                        List.of(InputEvent.EVENT_TYPE));
+        AgentPlan plan =
+                new AgentPlan(
+                        Map.of(action.getName(), action),
+                        Map.of(InputEvent.EVENT_TYPE, List.of(action)));
+        PythonActionExecutor executor = createExecutor(interpreter, plan);
+
+        executor.open();
+
+        verify(interpreter)
+                .invokeMethod(
+                        "__fa_function_module",
+                        "resolve_python_function",
+                        "app.agent",
+                        "handle",
+                        "__fa_job_operator_v2");
+    }
+
     private static PythonActionExecutor createExecutor(PythonInterpreter interpreter)
             throws Exception {
+        return createExecutor(interpreter, new AgentPlan(Map.of(), Map.of()));
+    }
+
+    private static PythonActionExecutor createExecutor(
+            PythonInterpreter interpreter, AgentPlan agentPlan) throws Exception {
         return new PythonActionExecutor(
                 interpreter,
-                new AgentPlan(Map.of(), Map.of()),
+                agentPlan,
                 mock(JavaResourceAdapter.class),
                 mock(PythonRunnerContextImpl.class),
-                "job-1");
+                "job-1",
+                "__fa_job_operator_v2");
     }
 }

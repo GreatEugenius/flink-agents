@@ -55,12 +55,12 @@ import static org.apache.flink.util.Preconditions.checkState;
  *
  * <p>Lifecycle of an update: {@link #preparePending} runs at event arrival on the mailbox thread —
  * it verifies the wire signature, deserializes the plan, pins the job-level configuration of the
- * bootstrap plan (only artifact coordinates are plan-scoped), builds the plan-scoped artifact
- * classloader and proves every Java action loadable through it. Python runtime construction is
- * deliberately deferred until the activation barrier. Newest wins: preparing a newer update
- * discards an unswitched older pending. {@link #switchToPending} runs at {@code
- * prepareSnapshotPreBarrier} after the operator drained its in-flight chains and activated the
- * pending runtime.
+ * bootstrap plan (only the four Java/Python artifact path and sha256 keys are plan-scoped), builds
+ * the plan-scoped artifact classloader and proves every Java action loadable through it. Python
+ * runtime construction is deliberately deferred until the activation barrier because loading user
+ * modules may execute import-time code. Newest wins: preparing a newer update discards an
+ * unswitched older pending. {@link #switchToPending} runs at {@code prepareSnapshotPreBarrier}
+ * after the operator drained its in-flight chains and activated the pending runtime.
  *
  * <p>Checkpointed fact: the current {@code (version, planId, canonicalPlanJson)} as union operator
  * state, one record per subtask. On restore every subtask picks the record with the highest
@@ -149,7 +149,7 @@ class PlanVersionManager {
     /**
      * Late wiring of the user-code classloader (available only from {@code open()}). A restored
      * dynamic plan re-creates its artifact classloader here and re-proves that its Java action
-     * classes are loadable before it can run.
+     * classes are loadable — without its artifact the plan cannot run, so this fails fast.
      */
     void open(Supplier<ClassLoader> userCodeClassLoader) throws Exception {
         this.userCodeClassLoader = userCodeClassLoader;
@@ -193,6 +193,11 @@ class PlanVersionManager {
         return pending == null ? null : pending.plan;
     }
 
+    long pendingPlanVersion() {
+        checkState(pending != null, "No pending AgentPlan.");
+        return pending.version;
+    }
+
     @Nullable
     ResourceCache pendingResourceCache() {
         return pending == null ? null : pending.resourceCache;
@@ -226,7 +231,6 @@ class PlanVersionManager {
                 planId);
         AgentPlan received = OBJECT_MAPPER.readValue(canonicalPlanJson, AgentPlan.class);
         AgentPlan effective = withBootstrapConfig(received);
-        validateJavaArtifactMetadata(effective);
         validateJavaArtifactTransition(current.plan, effective);
 
         PlanSlot prepared = new PlanSlot(version, planId, canonicalJsonOf(effective), effective);
@@ -317,7 +321,7 @@ class PlanVersionManager {
     /**
      * Job-level configuration is pinned at submission: the effective plan keeps the update's
      * actions/routing/resources but carries the bootstrap {@code AgentConfiguration}, except for
-     * Java and Python artifact coordinates whose values belong to a specific plan version.
+     * the update's four Java/Python artifact path and sha256 keys, which are plan-scoped by nature.
      */
     private AgentPlan withBootstrapConfig(AgentPlan received) {
         Map<String, Object> merged = new HashMap<>(bootstrapPlan.getConfig().getConfData());

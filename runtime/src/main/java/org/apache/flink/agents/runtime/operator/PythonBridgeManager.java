@@ -39,6 +39,7 @@ import org.apache.flink.python.env.PythonDependencyInfo;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import pemja.core.PythonInterpreter;
+import pemja.core.PythonInterpreterConfig;
 import pemja.core.object.PyObject;
 
 import javax.annotation.Nullable;
@@ -69,10 +70,12 @@ import static org.apache.flink.agents.plan.actions.Utils.supportAsync;
  *
  * <p>Lifecycle: instantiated by the operator's {@code open()} (lazy — not in the operator
  * constructor), then initialized via {@link #open}. At most one plan runtime is executable in the
- * process: after the activation barrier drains the old plan, {@link #activatePlan} closes its
- * interpreter and constructs the replacement. A Java-only plan still has a runtime when the
- * surrounding pipeline uses Python wire encoding, because input/output conversion runs in Python.
- * {@link #close()} closes the active interpreter and the shared environment manager.
+ * process: an update only receives static metadata validation on event arrival; after the
+ * activation barrier drains the old plan, {@link #activatePlan} quiesces and releases its versioned
+ * module namespace, closes its interpreter, and constructs the replacement. A Java-only plan still
+ * has a runtime when the surrounding pipeline uses Python wire encoding, because input/output
+ * conversion runs in Python. {@link #close()} releases the active module namespace before closing
+ * its interpreter and the shared environment manager.
  *
  * <p>Design constraint: package-private; no manager-to-manager held references. Other managers
  * receive what they need (e.g. the Python runner context, the action executor) via method
@@ -84,6 +87,11 @@ class PythonBridgeManager implements AutoCloseable {
 
     static final String PYTHON_ARTIFACT_PATH_CONFIG = "dynamic-plan.python-artifact.path";
     static final String PYTHON_ARTIFACT_SHA256_CONFIG = "dynamic-plan.python-artifact.sha256";
+    static final String PYTHON_RUNTIME_PATH_CONFIG = "dynamic-plan.python-runtime.path";
+
+    private static final String PLAN_FUNCTION_MODULE = "__fa_plan_function";
+    private static final String ACQUIRE_PYTHON_MODULE_NAMESPACE = "acquire_python_module_namespace";
+    private static final String RELEASE_PYTHON_MODULE_NAMESPACE = "release_python_module_namespace";
 
     private PythonEnvironmentManager pythonEnvironmentManager;
     @Nullable private PlanPythonRuntime activeRuntime;
@@ -96,7 +104,7 @@ class PythonBridgeManager implements AutoCloseable {
     private FlinkAgentsMetricGroupImpl metricGroup;
     private Runnable mailboxThreadChecker;
     private String jobIdentifier;
-
+    private String operatorIdentifier;
     private boolean initialized;
 
     PythonBridgeManager() {
@@ -142,7 +150,9 @@ class PythonBridgeManager implements AutoCloseable {
             FlinkAgentsMetricGroupImpl metricGroup,
             Runnable mailboxThreadChecker,
             String jobIdentifier,
-            ClassLoader planClassLoader)
+            ClassLoader planClassLoader,
+            String operatorIdentifier,
+            long planVersion)
             throws Exception {
         this.executionConfig = executionConfig;
         this.distributedCache = distributedCache;
@@ -151,14 +161,18 @@ class PythonBridgeManager implements AutoCloseable {
         this.metricGroup = metricGroup;
         this.mailboxThreadChecker = mailboxThreadChecker;
         this.jobIdentifier = jobIdentifier;
+        this.operatorIdentifier = operatorIdentifier;
 
         validatePythonPlanMetadata(agentPlan);
-        activeRuntime = createPlanRuntime(agentPlan, resourceCache, planClassLoader);
+        activeRuntime = createPlanRuntime(agentPlan, resourceCache, planClassLoader, planVersion);
     }
 
     @Nullable
     private PlanPythonRuntime createPlanRuntime(
-            AgentPlan agentPlan, ResourceCache resourceCache, ClassLoader planClassLoader)
+            AgentPlan agentPlan,
+            ResourceCache resourceCache,
+            ClassLoader planClassLoader,
+            long planVersion)
             throws Exception {
         boolean containPythonAction = containsPythonAction(agentPlan);
         boolean containPythonResource = containsPythonResource(agentPlan);
@@ -168,9 +182,21 @@ class PythonBridgeManager implements AutoCloseable {
             return null;
         }
 
-        PythonInterpreter interpreter = createPythonInterpreter();
+        PythonInterpreter interpreter = createPythonInterpreter(agentPlan);
         PythonActionExecutor pythonActionExecutor = null;
+        String artifactPath = pythonArtifactPath(agentPlan);
+        String moduleNamespace =
+                artifactPath == null
+                        ? null
+                        : pythonModuleNamespace(jobId, operatorIdentifier, planVersion);
+        boolean namespaceAcquired = false;
         try {
+            initializePlanFunctionModule(interpreter);
+            if (moduleNamespace != null) {
+                acquirePythonModuleNamespace(interpreter, moduleNamespace, artifactPath);
+                namespaceAcquired = true;
+            }
+
             PythonRunnerContextImpl pythonRunnerContext =
                     new PythonRunnerContextImpl(
                             metricGroup,
@@ -186,13 +212,21 @@ class PythonBridgeManager implements AutoCloseable {
             if (containPythonResource || mem0Configured) {
                 pythonResourceAdapter =
                         initPythonResourceAdapter(
-                                agentPlan, resourceCache, javaResourceAdapter, interpreter);
+                                agentPlan,
+                                resourceCache,
+                                javaResourceAdapter,
+                                interpreter,
+                                moduleNamespace);
             }
 
             if (containPythonAction || mem0Configured || pythonWireFormat) {
                 pythonActionExecutor =
                         initPythonActionExecutor(
-                                agentPlan, javaResourceAdapter, pythonRunnerContext, interpreter);
+                                agentPlan,
+                                javaResourceAdapter,
+                                pythonRunnerContext,
+                                interpreter,
+                                moduleNamespace);
             }
 
             Mem0LongTermMemory longTermMemory = null;
@@ -208,13 +242,21 @@ class PythonBridgeManager implements AutoCloseable {
                     pythonResourceAdapter,
                     javaResourceAdapter,
                     longTermMemory,
-                    interpreter);
+                    interpreter,
+                    moduleNamespace);
         } catch (Exception creationFailure) {
             if (pythonActionExecutor != null) {
                 try {
                     pythonActionExecutor.close();
                 } catch (Exception closeFailure) {
                     creationFailure.addSuppressed(closeFailure);
+                }
+            }
+            if (namespaceAcquired) {
+                try {
+                    releasePythonModuleNamespace(interpreter, moduleNamespace);
+                } catch (Exception cleanupFailure) {
+                    creationFailure.addSuppressed(cleanupFailure);
                 }
             }
             try {
@@ -226,53 +268,18 @@ class PythonBridgeManager implements AutoCloseable {
         }
     }
 
-    private PythonInterpreter createPythonInterpreter() throws Exception {
-        ensurePythonEnvironment();
-        EmbeddedPythonEnvironment env = pythonEnvironmentManager.createEnvironment();
-        return env.getInterpreter();
-    }
-
-    private void ensurePythonEnvironment() throws Exception {
-        if (initialized) {
-            return;
-        }
-        LOG.debug("Begin initialize PythonEnvironmentManager.");
-        PythonDependencyInfo dependencyInfo =
-                PythonDependencyInfo.create(executionConfig.toConfiguration(), distributedCache);
-        pythonEnvironmentManager =
-                new PythonEnvironmentManager(
-                        dependencyInfo, tmpDirs, new HashMap<>(System.getenv()), jobId);
-        pythonEnvironmentManager.open();
-        initialized = true;
-    }
-
-    private boolean containsPythonAction(AgentPlan agentPlan) {
-        return agentPlan.getActions().values().stream()
-                .anyMatch(action -> action.getExec() instanceof PythonFunction);
-    }
-
-    private boolean containsPythonResource(AgentPlan agentPlan) {
-        return agentPlan.getResourceProviders().values().stream()
-                .anyMatch(
-                        resourceProviderMap ->
-                                resourceProviderMap.values().stream()
-                                        .anyMatch(
-                                                resourceProvider ->
-                                                        resourceProvider
-                                                                instanceof PythonResourceProvider));
-    }
-
-    private boolean needsPythonRuntime(AgentPlan agentPlan) {
-        return pythonWireFormat
-                || containsPythonAction(agentPlan)
-                || containsPythonResource(agentPlan)
-                || isMem0Configured(agentPlan);
-    }
-
-    /** Validates plan-scoped Python artifact metadata without starting or mutating CPython. */
+    /** Validates plan-scoped Python paths without starting or mutating CPython. */
     void validatePythonPlanMetadata(AgentPlan agentPlan) throws Exception {
         if (!needsPythonRuntime(agentPlan)) {
             return;
+        }
+
+        String runtimePath = normalizedConfigValue(agentPlan, PYTHON_RUNTIME_PATH_CONFIG);
+        if (runtimePath != null) {
+            org.apache.flink.util.Preconditions.checkState(
+                    Files.exists(Path.of(runtimePath)),
+                    "Python runtime path %s does not exist.",
+                    runtimePath);
         }
 
         String artifactPath = normalizedConfigValue(agentPlan, PYTHON_ARTIFACT_PATH_CONFIG);
@@ -304,7 +311,7 @@ class PythonBridgeManager implements AutoCloseable {
                 expectedSha256,
                 actual);
         try (ZipFile ignored = new ZipFile(path.toFile())) {
-            // Opening the archive validates its central directory without importing user code.
+            // Opening the archive is enough to reject malformed zip/whl files before CPython.
         } catch (Exception e) {
             throw new IllegalStateException(
                     String.format(
@@ -314,11 +321,21 @@ class PythonBridgeManager implements AutoCloseable {
         }
     }
 
-    /** Rejects replacement of one Python artifact path with different contents. */
+    /** Validates immutable artifact and runtime-path boundaries for one running task. */
     void validatePythonPlanTransition(AgentPlan currentPlan, AgentPlan newPlan) {
         if (!needsPythonRuntime(currentPlan) && !needsPythonRuntime(newPlan)) {
             return;
         }
+
+        String currentRuntimePath =
+                normalizedConfiguredPath(currentPlan, PYTHON_RUNTIME_PATH_CONFIG);
+        String newRuntimePath = normalizedConfiguredPath(newPlan, PYTHON_RUNTIME_PATH_CONFIG);
+        org.apache.flink.util.Preconditions.checkState(
+                Objects.equals(currentRuntimePath, newRuntimePath),
+                "%s is job-level and cannot change while an AgentPlan job is running: %s -> %s.",
+                PYTHON_RUNTIME_PATH_CONFIG,
+                currentRuntimePath,
+                newRuntimePath);
 
         String currentArtifactPath =
                 normalizedConfiguredPath(currentPlan, PYTHON_ARTIFACT_PATH_CONFIG);
@@ -370,6 +387,71 @@ class PythonBridgeManager implements AutoCloseable {
     private static String normalizedConfigValue(AgentPlan plan, String key) {
         String configured = plan.getConfig().getStr(key, null);
         return configured == null || configured.trim().isEmpty() ? null : configured.trim();
+    }
+
+    private PythonInterpreter createPythonInterpreter(AgentPlan agentPlan) throws Exception {
+        ensurePythonEnvironment();
+        EmbeddedPythonEnvironment env = pythonEnvironmentManager.createEnvironment();
+        PythonInterpreterConfig baseConfig = env.getConfig();
+        PythonInterpreterConfig.PythonInterpreterConfigBuilder builder =
+                PythonInterpreterConfig.newBuilder().setExcType(baseConfig.getExecType());
+
+        String runtimePath = agentPlan.getConfig().getStr(PYTHON_RUNTIME_PATH_CONFIG, null);
+        if (runtimePath != null && !runtimePath.trim().isEmpty()) {
+            Path path = Path.of(runtimePath);
+            org.apache.flink.util.Preconditions.checkState(
+                    Files.exists(path), "Python runtime path %s does not exist.", runtimePath);
+            builder.addPythonPaths(path.toString());
+        }
+
+        builder.addPythonPaths(baseConfig.getPaths());
+        if (baseConfig.getPythonHome() != null) {
+            builder.setPythonHome(baseConfig.getPythonHome());
+        }
+        if (baseConfig.getWorkingDirectory() != null) {
+            builder.setWorkingDirectory(baseConfig.getWorkingDirectory());
+        }
+        if (baseConfig.getPythonExec() != null) {
+            builder.setPythonExec(baseConfig.getPythonExec());
+        }
+        return new PythonInterpreter(builder.build());
+    }
+
+    private void ensurePythonEnvironment() throws Exception {
+        if (initialized) {
+            return;
+        }
+        LOG.debug("Begin initialize PythonEnvironmentManager.");
+        PythonDependencyInfo dependencyInfo =
+                PythonDependencyInfo.create(executionConfig.toConfiguration(), distributedCache);
+        pythonEnvironmentManager =
+                new PythonEnvironmentManager(
+                        dependencyInfo, tmpDirs, new HashMap<>(System.getenv()), jobId);
+        pythonEnvironmentManager.open();
+        initialized = true;
+    }
+
+    private boolean containsPythonAction(AgentPlan agentPlan) {
+        return agentPlan.getActions().values().stream()
+                .anyMatch(action -> action.getExec() instanceof PythonFunction);
+    }
+
+    private boolean containsPythonResource(AgentPlan agentPlan) {
+        return agentPlan.getResourceProviders().values().stream()
+                .anyMatch(
+                        resourceProviderMap ->
+                                resourceProviderMap.values().stream()
+                                        .anyMatch(
+                                                resourceProvider ->
+                                                        resourceProvider
+                                                                instanceof PythonResourceProvider));
+    }
+
+    private boolean needsPythonRuntime(AgentPlan agentPlan) {
+        return pythonWireFormat
+                || containsPythonAction(agentPlan)
+                || containsPythonResource(agentPlan)
+                || isMem0Configured(agentPlan);
     }
 
     /**
@@ -437,7 +519,8 @@ class PythonBridgeManager implements AutoCloseable {
             AgentPlan agentPlan,
             JavaResourceAdapter javaResourceAdapter,
             PythonRunnerContextImpl pythonRunnerContext,
-            PythonInterpreter interpreter)
+            PythonInterpreter interpreter,
+            @Nullable String moduleNamespace)
             throws Exception {
         PythonActionExecutor pythonActionExecutor =
                 new PythonActionExecutor(
@@ -445,7 +528,8 @@ class PythonBridgeManager implements AutoCloseable {
                         agentPlan,
                         javaResourceAdapter,
                         pythonRunnerContext,
-                        jobIdentifier);
+                        jobIdentifier,
+                        moduleNamespace);
         try {
             pythonActionExecutor.open();
             return pythonActionExecutor;
@@ -459,37 +543,71 @@ class PythonBridgeManager implements AutoCloseable {
         }
     }
 
+    private static void initializePlanFunctionModule(PythonInterpreter interpreter) {
+        interpreter.exec(
+                "from flink_agents.plan import function as " + PLAN_FUNCTION_MODULE + "\n");
+    }
+
+    private static void acquirePythonModuleNamespace(
+            PythonInterpreter interpreter, String namespace, String artifactPath) {
+        interpreter.invokeMethod(
+                PLAN_FUNCTION_MODULE, ACQUIRE_PYTHON_MODULE_NAMESPACE, namespace, artifactPath);
+    }
+
+    private static void releasePythonModuleNamespace(
+            PythonInterpreter interpreter, String namespace) {
+        interpreter.invokeMethod(PLAN_FUNCTION_MODULE, RELEASE_PYTHON_MODULE_NAMESPACE, namespace);
+    }
+
+    static String pythonModuleNamespace(JobID jobId, String operatorIdentifier, long planVersion) {
+        return String.format(
+                "__fa_%s_%s_v%d", jobId.toHexString(), operatorIdentifier, planVersion);
+    }
+
     /**
-     * Rebuilds the Python-visible runtime while the checkpoint barrier still blocks input. The old
-     * runtime is quiesced and closed before the replacement is constructed and its declared Python
-     * action entries are resolved.
+     * Performs the Python-visible switch while the checkpoint barrier still blocks input. The old
+     * runtime is quiesced first and releases its lease on the old version namespace. The namespace
+     * is removed only when no co-located runtime still uses that version. The new runtime then
+     * acquires its version namespace and resolves the declared Python action entries inside it.
      *
      * <p>Any failure escapes the barrier. There is no local rollback after the old runtime has been
      * closed; the task must recover from the previous completed checkpoint.
      */
     void activatePlan(
-            AgentPlan newPlan, ResourceCache newResourceCache, ClassLoader planClassLoader)
+            AgentPlan newPlan,
+            ResourceCache newResourceCache,
+            ClassLoader planClassLoader,
+            long planVersion)
             throws Exception {
         closeActiveRuntime();
-        activeRuntime = createPlanRuntime(newPlan, newResourceCache, planClassLoader);
+        activeRuntime = createPlanRuntime(newPlan, newResourceCache, planClassLoader, planVersion);
     }
 
-    /** Stops old-plan async work before its interpreter and Java-side resources are released. */
+    /** Stops old-plan async work while retaining its interpreter as the cleanup handle. */
     void quiescePlan() throws Exception {
         if (activeRuntime != null) {
             activeRuntime.quiesce();
         }
     }
 
+    @Nullable
+    private static String pythonArtifactPath(AgentPlan plan) {
+        return normalizedConfiguredPath(plan, PYTHON_ARTIFACT_PATH_CONFIG);
+    }
+
     private PythonResourceAdapterImpl initPythonResourceAdapter(
             AgentPlan agentPlan,
             ResourceCache resourceCache,
             JavaResourceAdapter javaResourceAdapter,
-            PythonInterpreter interpreter)
+            PythonInterpreter interpreter,
+            @Nullable String moduleNamespace)
             throws Exception {
         PythonResourceAdapterImpl pythonResourceAdapter =
                 new PythonResourceAdapterImpl(
-                        resourceCache.getResourceContext(), interpreter, javaResourceAdapter);
+                        resourceCache.getResourceContext(),
+                        interpreter,
+                        javaResourceAdapter,
+                        moduleNamespace);
         pythonResourceAdapter.open();
         PythonMCPResourceDiscovery.discoverPythonMCPResources(
                 agentPlan.getResourceProviders(), pythonResourceAdapter, resourceCache);
@@ -564,6 +682,7 @@ class PythonBridgeManager implements AutoCloseable {
         private final JavaResourceAdapter javaResourceAdapter;
         private final Mem0LongTermMemory longTermMemory;
         private final PythonInterpreter pythonInterpreter;
+        @Nullable private final String moduleNamespace;
         private boolean quiesced;
         private boolean closed;
 
@@ -573,13 +692,15 @@ class PythonBridgeManager implements AutoCloseable {
                 PythonResourceAdapterImpl pythonResourceAdapter,
                 JavaResourceAdapter javaResourceAdapter,
                 Mem0LongTermMemory longTermMemory,
-                PythonInterpreter pythonInterpreter) {
+                PythonInterpreter pythonInterpreter,
+                @Nullable String moduleNamespace) {
             this.pythonActionExecutor = pythonActionExecutor;
             this.pythonRunnerContext = pythonRunnerContext;
             this.pythonResourceAdapter = pythonResourceAdapter;
             this.javaResourceAdapter = javaResourceAdapter;
             this.longTermMemory = longTermMemory;
             this.pythonInterpreter = pythonInterpreter;
+            this.moduleNamespace = moduleNamespace;
             this.quiesced = false;
             this.closed = false;
         }
@@ -604,6 +725,17 @@ class PythonBridgeManager implements AutoCloseable {
                 quiesce();
             } catch (Exception e) {
                 firstException = e;
+            }
+            if (moduleNamespace != null) {
+                try {
+                    releasePythonModuleNamespace(pythonInterpreter, moduleNamespace);
+                } catch (Exception e) {
+                    if (firstException == null) {
+                        firstException = e;
+                    } else {
+                        firstException.addSuppressed(e);
+                    }
+                }
             }
             if (pythonInterpreter != null) {
                 try {

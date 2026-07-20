@@ -140,27 +140,15 @@ class PythonBridgeManagerTest {
                     /* metricGroup */ null,
                     /* mailboxThreadChecker */ () -> {},
                     /* jobIdentifier */ "job-1",
-                    /* userCodeClassLoader */ Thread.currentThread().getContextClassLoader());
+                    /* userCodeClassLoader */ Thread.currentThread().getContextClassLoader(),
+                    /* operatorIdentifier */ "0123456789abcdef",
+                    /* planVersion */ 0L);
 
             // No-op contract: nothing initialized, no Pemja interpreter created.
             assertThat(bridge.isInitialized()).isFalse();
             assertThat(bridge.getPythonActionExecutor()).isNull();
             assertThat(bridge.getPythonRunnerContext()).isNull();
         }
-    }
-
-    @Test
-    void runtimeCloseStillClosesInterpreterWhenExecutorCloseFails() throws Exception {
-        PythonActionExecutor executor = mock(PythonActionExecutor.class);
-        PythonInterpreter interpreter = mock(PythonInterpreter.class);
-        doThrow(new Exception("executor close failed")).when(executor).close();
-
-        PythonBridgeManager.PlanPythonRuntime runtime =
-                new PythonBridgeManager.PlanPythonRuntime(
-                        executor, null, null, null, null, interpreter);
-
-        assertThatThrownBy(runtime::close).hasMessageContaining("executor close failed");
-        verify(interpreter).close();
     }
 
     @Test
@@ -174,6 +162,33 @@ class PythonBridgeManagerTest {
                     .hasMessageContaining("valid zip or wheel");
             assertThat(bridge.isInitialized()).isFalse();
         }
+    }
+
+    @Test
+    void runtimeCloseRetiresArtifactWhenExecutorCloseFails() throws Exception {
+        PythonActionExecutor executor = mock(PythonActionExecutor.class);
+        PythonInterpreter interpreter = mock(PythonInterpreter.class);
+        doThrow(new Exception("executor close failed")).when(executor).close();
+
+        PythonBridgeManager.PlanPythonRuntime runtime =
+                new PythonBridgeManager.PlanPythonRuntime(
+                        executor, null, null, null, null, interpreter, "__fa_job_operator_v1");
+
+        assertThatThrownBy(runtime::close).hasMessageContaining("executor close failed");
+        verify(interpreter)
+                .invokeMethod(
+                        "__fa_plan_function",
+                        "release_python_module_namespace",
+                        "__fa_job_operator_v1");
+        verify(interpreter).close();
+    }
+
+    @Test
+    void moduleNamespaceIncludesJobOperatorAndPlanVersion() {
+        JobID jobId = new JobID(0x1234L, 0x5678L);
+
+        assertThat(PythonBridgeManager.pythonModuleNamespace(jobId, "abcdef", 42L))
+                .isEqualTo("__fa_00000000000012340000000000005678_abcdef_v42");
     }
 
     private static AgentPlan pythonPlan(Path artifact) throws Exception {

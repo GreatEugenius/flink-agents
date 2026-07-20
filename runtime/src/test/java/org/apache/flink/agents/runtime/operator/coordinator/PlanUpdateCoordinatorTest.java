@@ -60,8 +60,11 @@ public class PlanUpdateCoordinatorTest {
         PlanUpdateCoordinator coordinator = new PlanUpdateCoordinator(new FakeContext());
         FakeGateway gateway = ready(coordinator, 0);
 
-        PlanUpdateResponse response = submit(coordinator, json(plan("actionA")));
+        String submittedJson = json(plan("actionA"));
+        String canonicalJson = PlanIds.canonicalize(submittedJson);
+        PlanUpdateResponse response = submit(coordinator, submittedJson);
         assertThat(response.planVersion).isEqualTo(1L);
+        assertThat(response.planId).isEqualTo(PlanIds.planIdOf(canonicalJson));
         // The candidate is volatile and nothing goes out before every subtask crossed K.
         assertThat(gateway.sentEvents).isEmpty();
 
@@ -76,7 +79,10 @@ public class PlanUpdateCoordinatorTest {
         // K completed globally: announce to every subtask.
         coordinator.notifyCheckpointComplete(10L);
         assertThat(gateway.sentEvents).hasSize(1);
-        assertThat(((PlanUpdateEvent) gateway.sentEvents.get(0)).planVersion).isEqualTo(1L);
+        PlanUpdateEvent event = (PlanUpdateEvent) gateway.sentEvents.get(0);
+        assertThat(event.planVersion).isEqualTo(1L);
+        assertThat(event.planId).isEqualTo(response.planId);
+        assertThat(event.canonicalPlanJson).isEqualTo(canonicalJson);
     }
 
     @Test

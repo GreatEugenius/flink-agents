@@ -123,6 +123,14 @@ public class KafkaActionStateStore implements ActionStateStore {
         LOG.info("Initialized KafkaActionStateStore with topic: {}", topic);
     }
 
+    // Null only before an owner selects a plan scope (for standalone store use).
+    private volatile String activePlanId;
+
+    @Override
+    public void setActivePlanId(String planId) {
+        this.activePlanId = Preconditions.checkArgumentNotNull(planId, "planId must not be null");
+    }
+
     @Override
     public void put(Object key, long seqNum, Action action, Event event, ActionState state)
             throws Exception {
@@ -131,7 +139,7 @@ public class KafkaActionStateStore implements ActionStateStore {
             return;
         }
 
-        String stateKey = generateKey(key, seqNum, action, event);
+        String stateKey = generateKey(key, seqNum, action, event, activePlanId);
         try {
             ProducerRecord<String, ActionState> kafkaRecord =
                     new ProducerRecord<>(topic, stateKey, state);
@@ -149,7 +157,7 @@ public class KafkaActionStateStore implements ActionStateStore {
 
     @Override
     public ActionState get(Object key, long seqNum, Action action, Event event) throws Exception {
-        String stateKey = generateKey(key, seqNum, action, event);
+        String stateKey = generateKey(key, seqNum, action, event, activePlanId);
 
         LOG.debug(
                 "Looking up action state: key={}, seqNum={}, stateKey={}, cachedStates={}",
@@ -161,10 +169,15 @@ public class KafkaActionStateStore implements ActionStateStore {
         boolean hasDivergence = checkDivergence(key.toString(), seqNum);
 
         if (!actionStates.containsKey(stateKey) || hasDivergence) {
+            String keyPrefix = key + "_";
             actionStates
                     .entrySet()
                     .removeIf(
                             entry -> {
+                                if (!entry.getKey().startsWith(keyPrefix)
+                                        || !isInActivePlanScope(entry.getKey())) {
+                                    return false;
+                                }
                                 // Extract key and sequence number from the state key
                                 try {
                                     List<String> parts = ActionStateUtil.parseKey(entry.getKey());
@@ -174,10 +187,10 @@ public class KafkaActionStateStore implements ActionStateStore {
                                         // the requested seqNum
                                         return stateSeqNum > seqNum;
                                     }
-                                } catch (NumberFormatException e) {
+                                } catch (RuntimeException e) {
                                     LOG.warn(
                                             "Failed to parse sequence number from state key: {}",
-                                            stateKey);
+                                            entry.getKey());
                                 }
                                 return false;
                             });
@@ -196,8 +209,16 @@ public class KafkaActionStateStore implements ActionStateStore {
     private boolean checkDivergence(String key, long seqNum) {
         return actionStates.keySet().stream()
                         .filter(k -> k.startsWith(key + "_" + seqNum + "_"))
+                        .filter(this::isInActivePlanScope)
                         .count()
                 > 1;
+    }
+
+    private boolean isInActivePlanScope(String stateKey) {
+        if (activePlanId == null) {
+            return ActionStateUtil.parseKey(stateKey).size() == 4;
+        }
+        return stateKey.endsWith("_" + activePlanId);
     }
 
     @Override

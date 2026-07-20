@@ -45,6 +45,8 @@ import static org.mockito.Mockito.when;
 public class FlussActionStateStoreTest {
 
     private static final String TEST_KEY = "test-key";
+    private static final String PLAN_ID_A = "a".repeat(64);
+    private static final String PLAN_ID_B = "b".repeat(64);
 
     private AppendWriter mockWriter;
     private FlussActionStateStore store;
@@ -117,6 +119,21 @@ public class FlussActionStateStoreTest {
         assertThat(store.get(TEST_KEY, 1L, testAction, testEvent)).isNotNull();
         assertThat(store.get(TEST_KEY, 2L, testAction, testEvent)).isNotNull();
         assertThat(store.get(TEST_KEY, 3L, testAction, testEvent)).isNull();
+    }
+
+    @Test
+    void planScopesDoNotCauseDivergenceOrCleanEachOthersFutureState() throws Exception {
+        store.setActivePlanId(PLAN_ID_A);
+        store.put(TEST_KEY, 1L, testAction, testEvent, testActionState);
+        store.put(TEST_KEY, 2L, testAction, testEvent, testActionState);
+
+        store.setActivePlanId(PLAN_ID_B);
+        store.put(TEST_KEY, 1L, testAction, testEvent, testActionState);
+        assertThat(store.get(TEST_KEY, 1L, testAction, testEvent)).isSameAs(testActionState);
+
+        store.setActivePlanId(PLAN_ID_A);
+        assertThat(store.get(TEST_KEY, 1L, testAction, testEvent)).isSameAs(testActionState);
+        assertThat(store.get(TEST_KEY, 2L, testAction, testEvent)).isSameAs(testActionState);
     }
 
     // ==================== rebuildState tests ====================

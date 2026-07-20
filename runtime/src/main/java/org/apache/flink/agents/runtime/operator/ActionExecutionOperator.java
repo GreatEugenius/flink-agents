@@ -167,6 +167,7 @@ public class ActionExecutionOperator<IN, OUT> extends AbstractStreamOperator<OUT
         durableExecManager.maybeInitActionStateStore(effectivePlan.getConfig());
         durableExecManager.initRecoveryMarkerState(getOperatorStateBackend());
         durableExecManager.initializeKeyedStates(getRuntimeContext());
+        durableExecManager.setActivePlanId(planManager.currentPlanId());
 
         // init PythonActionExecutor and PythonResourceAdapter for the effective plan.
         // ResourceCache (owned per plan by the PlanVersionManager) constructs its own long-lived
@@ -591,6 +592,7 @@ public class ActionExecutionOperator<IN, OUT> extends AbstractStreamOperator<OUT
             pythonBridge.activatePlan(nextPlan, planManager.pendingResourceCache());
 
             planManager.switchToPending();
+            durableExecManager.setActivePlanId(planManager.currentPlanId());
         }
         super.prepareSnapshotPreBarrier(checkpointId);
     }
@@ -732,6 +734,11 @@ public class ActionExecutionOperator<IN, OUT> extends AbstractStreamOperator<OUT
     @VisibleForTesting
     long getCurrentPlanVersionForTesting() {
         return planManager.currentPlanVersion();
+    }
+
+    @VisibleForTesting
+    String getCurrentPlanIdForTesting() {
+        return planManager.currentPlanId();
     }
 
     @VisibleForTesting

@@ -28,6 +28,8 @@ import org.apache.flink.agents.plan.AgentPlan;
 import org.apache.flink.agents.plan.JavaFunction;
 import org.apache.flink.agents.plan.PythonFunction;
 import org.apache.flink.agents.plan.actions.Action;
+import org.apache.flink.agents.runtime.actionstate.ActionState;
+import org.apache.flink.agents.runtime.actionstate.InMemoryActionStateStore;
 import org.apache.flink.agents.runtime.operator.coordinator.PlanIds;
 import org.apache.flink.agents.runtime.operator.coordinator.PlanUpdateMessages.PlanUpdateEvent;
 import org.apache.flink.agents.runtime.python.utils.PythonActionExecutor;
@@ -138,6 +140,120 @@ public class DynamicPlanSwitchOperatorTest {
             restored.processElement(new StreamRecord<>(4L));
             op.waitInFlightEventsFinished();
             assertThat(outputs(restored)).containsExactly("new:4");
+        }
+    }
+
+    @Test
+    void samePlanIdReusesActionStateAcrossPlanVersions() throws Exception {
+        AgentPlan bootstrapPlan = singleActionPlan("oldAction");
+        AgentPlan repeatedPlan = singleActionPlan("newAction");
+        String repeatedPlanJson = canonicalJson(repeatedPlan);
+        String repeatedPlanId = PlanIds.planIdOf(repeatedPlanJson);
+        InMemoryActionStateStore store = new InMemoryActionStateStore(false);
+        InputEvent inputEvent = new InputEvent(42L);
+        ActionState state = new ActionState(inputEvent);
+
+        try (KeyedOneInputStreamOperatorTestHarness<Long, Long, Object> harness =
+                harness(bootstrapPlan, store)) {
+            harness.open();
+            ActionExecutionOperator<Long, Object> op = op(harness);
+
+            op.handleOperatorEvent(new PlanUpdateEvent(1L, repeatedPlanId, repeatedPlanJson));
+            checkpoint(harness, 1L);
+            Action firstAction = op.getCurrentPlanForTesting().getActions().get("newAction");
+            store.put("scope-key", 42L, firstAction, inputEvent, state);
+
+            op.handleOperatorEvent(new PlanUpdateEvent(2L, repeatedPlanId, repeatedPlanJson));
+            checkpoint(harness, 2L);
+            Action secondAction = op.getCurrentPlanForTesting().getActions().get("newAction");
+
+            assertThat(store.get("scope-key", 42L, secondAction, inputEvent)).isSameAs(state);
+        }
+    }
+
+    @Test
+    void reusedPlanVersionDoesNotReplayStateFromDifferentCandidate() throws Exception {
+        AgentPlan bootstrapPlan = singleActionPlan("oldAction");
+        InMemoryActionStateStore store = new InMemoryActionStateStore(false);
+        InputEvent inputEvent = new InputEvent(42L);
+        ActionState candidateAState = new ActionState(inputEvent);
+        OperatorSubtaskState bootstrapSnapshot;
+
+        try (KeyedOneInputStreamOperatorTestHarness<Long, Long, Object> harness =
+                harness(bootstrapPlan, store)) {
+            harness.open();
+            bootstrapSnapshot = checkpoint(harness, 1L);
+
+            AgentPlan candidateA = configuredActionPlan("candidate-a");
+            String candidateAJson = canonicalJson(candidateA);
+            op(harness)
+                    .handleOperatorEvent(
+                            new PlanUpdateEvent(
+                                    1L, PlanIds.planIdOf(candidateAJson), candidateAJson));
+            checkpoint(harness, 2L);
+            Action actionA =
+                    op(harness).getCurrentPlanForTesting().getActions().get("configuredAction");
+            store.put("scope-key", 42L, actionA, inputEvent, candidateAState);
+        }
+
+        try (KeyedOneInputStreamOperatorTestHarness<Long, Long, Object> restored =
+                harness(bootstrapPlan, store)) {
+            restored.initializeState(bootstrapSnapshot);
+            restored.open();
+
+            AgentPlan candidateB = configuredActionPlan("candidate-b");
+            String candidateBJson = canonicalJson(candidateB);
+            op(restored)
+                    .handleOperatorEvent(
+                            new PlanUpdateEvent(
+                                    1L, PlanIds.planIdOf(candidateBJson), candidateBJson));
+            checkpoint(restored, 3L);
+            Action actionB =
+                    op(restored).getCurrentPlanForTesting().getActions().get("configuredAction");
+
+            assertThat(store.get("scope-key", 42L, actionB, inputEvent)).isNull();
+        }
+    }
+
+    @Test
+    void coordinatorPlanIdSurvivesEffectivePlanSnapshotAndRestore() throws Exception {
+        AgentPlan bootstrapPlan = singleActionPlan("oldAction");
+        String bootstrapPlanId =
+                PlanIds.planIdOf(PlanVersionManager.canonicalJsonOf(bootstrapPlan));
+        AgentPlan submittedPlan = singleActionPlan("newAction");
+        submittedPlan.getConfig().setStr("update-only-key", "discarded-by-config-pinning");
+        String submittedPlanJson = canonicalJson(submittedPlan);
+        String coordinatorPlanId = PlanIds.planIdOf(submittedPlanJson);
+        OperatorSubtaskState snapshot;
+
+        InMemoryActionStateStore firstStore = new InMemoryActionStateStore(false);
+        try (KeyedOneInputStreamOperatorTestHarness<Long, Long, Object> harness =
+                harness(bootstrapPlan, firstStore)) {
+            harness.open();
+            ActionExecutionOperator<Long, Object> op = op(harness);
+            assertThat(op.getCurrentPlanIdForTesting()).isEqualTo(bootstrapPlanId);
+            assertThat(firstStore.getActivePlanId()).isEqualTo(bootstrapPlanId);
+
+            op.handleOperatorEvent(new PlanUpdateEvent(1L, coordinatorPlanId, submittedPlanJson));
+            snapshot = checkpoint(harness, 1L);
+
+            assertThat(op.getCurrentPlanIdForTesting()).isEqualTo(coordinatorPlanId);
+            assertThat(firstStore.getActivePlanId()).isEqualTo(coordinatorPlanId);
+            assertThat(
+                            PlanIds.planIdOf(
+                                    PlanVersionManager.canonicalJsonOf(
+                                            op.getCurrentPlanForTesting())))
+                    .isNotEqualTo(coordinatorPlanId);
+        }
+
+        InMemoryActionStateStore restoredStore = new InMemoryActionStateStore(false);
+        try (KeyedOneInputStreamOperatorTestHarness<Long, Long, Object> restored =
+                harness(bootstrapPlan, restoredStore)) {
+            restored.initializeState(snapshot);
+            restored.open();
+
+            assertThat(op(restored).getCurrentPlanIdForTesting()).isEqualTo(coordinatorPlanId);
+            assertThat(restoredStore.getActivePlanId()).isEqualTo(coordinatorPlanId);
         }
     }
 
@@ -331,8 +447,13 @@ public class DynamicPlanSwitchOperatorTest {
 
     private static KeyedOneInputStreamOperatorTestHarness<Long, Long, Object> harness(
             AgentPlan plan) throws Exception {
+        return harness(plan, null);
+    }
+
+    private static KeyedOneInputStreamOperatorTestHarness<Long, Long, Object> harness(
+            AgentPlan plan, InMemoryActionStateStore actionStateStore) throws Exception {
         return new KeyedOneInputStreamOperatorTestHarness<>(
-                new ActionExecutionOperatorFactory<>(plan, true),
+                new ActionExecutionOperatorFactory<>(plan, true, actionStateStore),
                 (KeySelector<Long, Long>) value -> value,
                 TypeInformation.of(Long.class));
     }
@@ -360,6 +481,10 @@ public class DynamicPlanSwitchOperatorTest {
 
     private static String json(AgentPlan plan) throws Exception {
         return OBJECT_MAPPER.writeValueAsString(plan);
+    }
+
+    private static String canonicalJson(AgentPlan plan) throws Exception {
+        return PlanIds.canonicalize(json(plan));
     }
 
     public static void oldAction(Event event, RunnerContext context) {

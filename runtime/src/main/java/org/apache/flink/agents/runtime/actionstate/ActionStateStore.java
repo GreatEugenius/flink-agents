@@ -90,4 +90,12 @@ public interface ActionStateStore extends AutoCloseable {
     default Object getRecoveryMarker() {
         return null;
     }
+
+    /**
+     * Scopes subsequently generated state keys by the content identity of the plan now live on this
+     * subtask. Implementations without dynamic plan support may ignore this.
+     *
+     * @param planId the coordinator-minted content identity of the live plan
+     */
+    default void setActivePlanId(String planId) {}
 }

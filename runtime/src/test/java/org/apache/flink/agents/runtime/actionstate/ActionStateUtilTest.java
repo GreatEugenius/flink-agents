@@ -25,11 +25,16 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** Test class for {@link ActionStateUtil}. */
 public class ActionStateUtilTest {
+
+    private static final String PLAN_ID_A = "a".repeat(64);
+    private static final String PLAN_ID_B = "b".repeat(64);
 
     @Test
     public void testGenerateKeyConsistency() throws Exception {
@@ -61,6 +66,50 @@ public class ActionStateUtilTest {
 
         // Keys should be different for different inputs
         assertNotEquals(key1, key2);
+    }
+
+    @Test
+    public void testUnscopedKeyKeepsFourPartFormat() throws Exception {
+        Object key = "legacy-key";
+        Action action = new NoOpAction("legacy-action");
+        InputEvent inputEvent = new InputEvent("legacy-input");
+
+        String unscopedKey = ActionStateUtil.generateKey(key, 1L, action, inputEvent);
+
+        assertEquals(4, ActionStateUtil.parseKey(unscopedKey).size());
+    }
+
+    @Test
+    public void testPlanIdSeparatesOtherwiseIdenticalKeys() throws Exception {
+        Object key = "scoped-key";
+        Action action = new NoOpAction("scoped-action");
+        InputEvent inputEvent = new InputEvent("scoped-input");
+
+        String planA = ActionStateUtil.generateKey(key, 1L, action, inputEvent, PLAN_ID_A);
+        String planB = ActionStateUtil.generateKey(key, 1L, action, inputEvent, PLAN_ID_B);
+
+        assertNotEquals(planA, planB);
+        assertEquals(PLAN_ID_A, ActionStateUtil.parseKey(planA).get(4));
+        assertEquals(PLAN_ID_B, ActionStateUtil.parseKey(planB).get(4));
+    }
+
+    @Test
+    public void testInMemoryStoreScopesStateByPlanId() throws Exception {
+        InMemoryActionStateStore store = new InMemoryActionStateStore(false);
+        Object key = "store-key";
+        Action action = new NoOpAction("store-action");
+        InputEvent inputEvent = new InputEvent("store-input");
+        ActionState state = new ActionState(inputEvent);
+
+        store.setActivePlanId(PLAN_ID_A);
+        store.put(key, 1L, action, inputEvent, state);
+        assertSame(state, store.get(key, 1L, action, inputEvent));
+
+        store.setActivePlanId(PLAN_ID_B);
+        assertNull(store.get(key, 1L, action, inputEvent));
+
+        store.setActivePlanId(PLAN_ID_A);
+        assertSame(state, store.get(key, 1L, action, inputEvent));
     }
 
     @Test

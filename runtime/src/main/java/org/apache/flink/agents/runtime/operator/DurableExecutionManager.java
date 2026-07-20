@@ -132,6 +132,17 @@ class DurableExecutionManager implements ActionStatePersister, AutoCloseable {
         return actionStateStore != null;
     }
 
+    /**
+     * Scopes durable action-state keys by the live plan's content identity so a replay never reuses
+     * results written by a different candidate. Called at open with the restored planId and again
+     * at every plan switch.
+     */
+    void setActivePlanId(String planId) {
+        if (actionStateStore != null) {
+            actionStateStore.setActivePlanId(planId);
+        }
+    }
+
     void initRecoveryMarkerState(OperatorStateBackend operatorStateBackend) throws Exception {
         if (actionStateStore != null) {
             recoveryMarkerOpState =

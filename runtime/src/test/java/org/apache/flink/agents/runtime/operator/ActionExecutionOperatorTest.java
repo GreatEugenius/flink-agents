@@ -37,6 +37,7 @@ import org.apache.flink.agents.runtime.actionstate.ActionState;
 import org.apache.flink.agents.runtime.actionstate.CallResult;
 import org.apache.flink.agents.runtime.actionstate.InMemoryActionStateStore;
 import org.apache.flink.agents.runtime.eventlog.FileEventLogger;
+import org.apache.flink.agents.runtime.operator.coordinator.PlanIds;
 import org.apache.flink.api.common.typeinfo.TypeInformation;
 import org.apache.flink.api.java.functions.KeySelector;
 import org.apache.flink.runtime.checkpoint.OperatorSubtaskState;
@@ -2116,6 +2117,8 @@ public class ActionExecutionOperatorTest {
             String actionName,
             ActionState actionState)
             throws Exception {
+        actionStateStore.setActivePlanId(
+                PlanIds.planIdOf(PlanVersionManager.canonicalJsonOf(agentPlan)));
         InputEvent event = new InputEvent(input);
         Action action = agentPlan.getActions().get(actionName);
         actionStateStore.put(key, 0L, action, event, actionState);

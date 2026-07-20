@@ -53,12 +53,12 @@ import static org.apache.flink.util.Preconditions.checkState;
  * {@code prepareSnapshotPreBarrier} after the operator drained its in-flight chains and activated
  * the pending runtime.
  *
- * <p>Checkpointed fact: the current {@code (version, canonicalPlanJson)} as union operator state,
- * one record per subtask. On restore every subtask picks the record with the highest planVersion,
- * so after rescale all subtasks converge on the same plan. An empty state means the job never
- * switched and runs the bootstrap plan from the job graph. The pending slot is deliberately not
- * checkpointed: global recovery discards the volatile update and restores only the completed active
- * plan.
+ * <p>Checkpointed fact: the current {@code (version, planId, canonicalPlanJson)} as union operator
+ * state, one record per subtask. On restore every subtask picks the record with the highest
+ * planVersion, so after rescale all subtasks converge on the same plan. An empty state means the
+ * job never switched and runs the bootstrap plan from the job graph. The pending slot is
+ * deliberately not checkpointed: global recovery discards the volatile update and restores only the
+ * completed active plan.
  */
 class PlanVersionManager {
 
@@ -79,7 +79,10 @@ class PlanVersionManager {
 
     PlanVersionManager(AgentPlan bootstrapPlan) {
         this.bootstrapPlan = bootstrapPlan;
-        this.current = new PlanSlot(0L, null, bootstrapPlan);
+        String bootstrapPlanJson = canonicalJsonOf(bootstrapPlan);
+        this.current =
+                new PlanSlot(
+                        0L, PlanIds.planIdOf(bootstrapPlanJson), bootstrapPlanJson, bootstrapPlan);
     }
 
     /**
@@ -101,23 +104,25 @@ class PlanVersionManager {
             }
         }
         if (newest != null) {
+            checkState(
+                    newest.planId != null && !newest.planId.isBlank(),
+                    "Restored dynamic AgentPlan state is missing planId.");
             AgentPlan plan = OBJECT_MAPPER.readValue(newest.canonicalPlanJson, AgentPlan.class);
-            current = new PlanSlot(newest.version, newest.canonicalPlanJson, plan);
+            current = new PlanSlot(newest.version, newest.planId, newest.canonicalPlanJson, plan);
             LOG.info(
                     "Restored dynamic AgentPlan with planVersion {} from checkpoint state.",
                     newest.version);
         }
     }
 
-    /**
-     * Writes the current {@code (version, json)}; a never-switched subtask keeps the state empty.
-     */
+    /** Writes the current plan record; a never-switched subtask keeps the state empty. */
     void snapshotState() throws Exception {
         currentPlanState.clear();
         if (current.version > 0) {
             currentPlanState.add(
                     OBJECT_MAPPER.writeValueAsString(
-                            new CurrentPlanRecord(current.version, current.canonicalPlanJson())));
+                            new CurrentPlanRecord(
+                                    current.version, current.planId, current.canonicalPlanJson)));
         }
     }
 
@@ -132,6 +137,10 @@ class PlanVersionManager {
 
     long currentPlanVersion() {
         return current.version;
+    }
+
+    String currentPlanId() {
+        return current.planId;
     }
 
     AgentPlan currentPlan() {
@@ -189,7 +198,7 @@ class PlanVersionManager {
         AgentPlan received = OBJECT_MAPPER.readValue(canonicalPlanJson, AgentPlan.class);
         AgentPlan effective = withBootstrapConfig(received);
 
-        PlanSlot prepared = new PlanSlot(version, canonicalJsonOf(effective), effective);
+        PlanSlot prepared = new PlanSlot(version, planId, canonicalJsonOf(effective), effective);
         try {
             validateJavaActionsExecutable(effective, userCodeClassLoader.get());
             prepared.resourceCache =
@@ -299,22 +308,17 @@ class PlanVersionManager {
     /** One plan version and the plan-scoped resources tied to it. */
     private static final class PlanSlot {
         final long version;
-        @Nullable private String canonicalPlanJson;
+        final String planId;
+        private final String canonicalPlanJson;
         final AgentPlan plan;
         @Nullable ResourceCache resourceCache;
 
-        PlanSlot(long version, @Nullable String canonicalPlanJson, AgentPlan plan) {
+        PlanSlot(long version, String planId, String canonicalPlanJson, AgentPlan plan) {
             this.version = version;
+            checkState(planId != null && !planId.isBlank(), "planId must not be empty.");
+            this.planId = planId;
             this.canonicalPlanJson = canonicalPlanJson;
             this.plan = plan;
-        }
-
-        /** Lazily computed for the bootstrap plan: only needed once a snapshot must persist it. */
-        String canonicalPlanJson() {
-            if (canonicalPlanJson == null) {
-                canonicalPlanJson = canonicalJsonOf(plan);
-            }
-            return canonicalPlanJson;
         }
 
         void close() throws Exception {
@@ -329,12 +333,14 @@ class PlanVersionManager {
     public static final class CurrentPlanRecord implements Serializable {
         private static final long serialVersionUID = 1L;
         public long version;
+        public String planId;
         public String canonicalPlanJson;
 
         public CurrentPlanRecord() {}
 
-        public CurrentPlanRecord(long version, String canonicalPlanJson) {
+        public CurrentPlanRecord(long version, String planId, String canonicalPlanJson) {
             this.version = version;
+            this.planId = planId;
             this.canonicalPlanJson = canonicalPlanJson;
         }
     }

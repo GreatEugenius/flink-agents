@@ -338,15 +338,23 @@ public class DynamicPlanSwitchOperatorTest {
             newPlan.getConfig().setStr("job-identifier", "attempted-override");
             newPlan.getConfig().setInt("num-async-threads", 1);
             newPlan.getConfig().setStr("update-only-key", "ignored");
+            newPlan.getConfig()
+                    .setStr(PlanVersionManager.JAVA_ARTIFACT_PATH_CONFIG, "/tmp/plan-v1.jar");
+            newPlan.getConfig()
+                    .setStr(PlanVersionManager.JAVA_ARTIFACT_SHA256_CONFIG, "artifact-digest");
             op.handleOperatorEvent(planUpdate(1L, json(newPlan)));
             checkpoint(harness, 1L);
 
-            // Job-level configuration is pinned at submission; only the update's plan structure
-            // (actions, routing and resources) is applied.
+            // Job-level configuration is pinned at submission; artifact coordinates are the
+            // plan-scoped exception.
             AgentConfiguration effective = op.getCurrentPlanForTesting().getConfig();
             assertThat(effective.getStr("job-identifier", null)).isNull();
             assertThat(effective.getInt("num-async-threads", -1)).isEqualTo(-1);
             assertThat(effective.getStr("update-only-key", null)).isNull();
+            assertThat(effective.getStr(PlanVersionManager.JAVA_ARTIFACT_PATH_CONFIG, null))
+                    .isEqualTo("/tmp/plan-v1.jar");
+            assertThat(effective.getStr(PlanVersionManager.JAVA_ARTIFACT_SHA256_CONFIG, null))
+                    .isEqualTo("artifact-digest");
         }
     }
 

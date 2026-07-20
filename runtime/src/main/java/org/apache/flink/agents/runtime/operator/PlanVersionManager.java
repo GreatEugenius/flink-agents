@@ -36,6 +36,7 @@ import javax.annotation.Nullable;
 import java.io.Serializable;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Set;
 import java.util.function.Supplier;
 
 import static org.apache.flink.util.Preconditions.checkState;
@@ -47,11 +48,11 @@ import static org.apache.flink.util.Preconditions.checkState;
  *
  * <p>Lifecycle of an update: {@link #preparePending} runs at event arrival on the mailbox thread —
  * it verifies the wire signature, deserializes the plan, pins the job-level configuration of the
- * bootstrap plan, and proves every Java action loadable through the job's user-code classloader.
- * Python runtime construction is deliberately deferred until the activation barrier. Newest wins:
- * preparing a newer update discards an unswitched older pending. {@link #switchToPending} runs at
- * {@code prepareSnapshotPreBarrier} after the operator drained its in-flight chains and activated
- * the pending runtime.
+ * bootstrap plan (only artifact coordinates are plan-scoped), and proves every Java action loadable
+ * through the job's user-code classloader. Python runtime construction is deliberately deferred
+ * until the activation barrier. Newest wins: preparing a newer update discards an unswitched older
+ * pending. {@link #switchToPending} runs at {@code prepareSnapshotPreBarrier} after the operator
+ * drained its in-flight chains and activated the pending runtime.
  *
  * <p>Checkpointed fact: the current {@code (version, planId, canonicalPlanJson)} as union operator
  * state, one record per subtask. On restore every subtask picks the record with the highest
@@ -63,6 +64,13 @@ import static org.apache.flink.util.Preconditions.checkState;
 class PlanVersionManager {
 
     private static final Logger LOG = LoggerFactory.getLogger(PlanVersionManager.class);
+
+    static final String JAVA_ARTIFACT_PATH_CONFIG = "dynamic-plan.java-artifact.path";
+    static final String JAVA_ARTIFACT_SHA256_CONFIG = "dynamic-plan.java-artifact.sha256";
+
+    /** Update-carried config keys honored during the bootstrap-config merge. */
+    private static final Set<String> PLAN_SCOPED_CONFIG_KEYS =
+            Set.of(JAVA_ARTIFACT_PATH_CONFIG, JAVA_ARTIFACT_SHA256_CONFIG);
 
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
@@ -274,10 +282,20 @@ class PlanVersionManager {
 
     /**
      * Job-level configuration is pinned at submission: the effective plan keeps the update's
-     * actions/routing/resources but carries the bootstrap {@code AgentConfiguration}.
+     * actions/routing/resources but carries the bootstrap {@code AgentConfiguration}, except for
+     * artifact coordinates whose value belongs to a specific plan version.
      */
     private AgentPlan withBootstrapConfig(AgentPlan received) {
         Map<String, Object> merged = new HashMap<>(bootstrapPlan.getConfig().getConfData());
+        PLAN_SCOPED_CONFIG_KEYS.forEach(merged::remove);
+        received.getConfig()
+                .getConfData()
+                .forEach(
+                        (key, value) -> {
+                            if (PLAN_SCOPED_CONFIG_KEYS.contains(key)) {
+                                merged.put(key, value);
+                            }
+                        });
         return new AgentPlan(
                 received.getActions(),
                 received.getActionsByEvent(),

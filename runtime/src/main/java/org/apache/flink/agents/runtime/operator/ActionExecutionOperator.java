@@ -172,10 +172,9 @@ public class ActionExecutionOperator<IN, OUT> extends AbstractStreamOperator<OUT
         // init PythonActionExecutor and PythonResourceAdapter for the effective plan.
         // ResourceCache (owned per plan by the PlanVersionManager) constructs its own long-lived
         // ResourceContextImpl internally; on close() the cache cascades close to it and to the
-        // cached SkillManager, covering Flink failover when the JVM does not exit. The Flink
-        // user-code classloader is threaded down so classpath: skill sources resolve against the
-        // user JAR regardless of which thread (mailbox / Python interpreter / async pool) later
-        // triggers the lazy SkillManager construction.
+        // cached SkillManager, covering Flink failover when the JVM does not exit. The active
+        // plan classloader is threaded down so both job jars and a dynamic Java artifact remain
+        // visible from mailbox, Python interpreter and async-pool threads.
         pythonBridge = new PythonBridgeManager(!inputIsJava);
         pythonBridge.open(
                 effectivePlan,
@@ -187,7 +186,7 @@ public class ActionExecutionOperator<IN, OUT> extends AbstractStreamOperator<OUT
                 metricGroup,
                 this::checkMailboxThread,
                 jobIdentifier,
-                getRuntimeContext().getUserCodeClassLoader());
+                planManager.currentClassLoader());
 
         // init context manager for runner context creation and memory contexts
         contextManager =
@@ -378,8 +377,7 @@ public class ActionExecutionOperator<IN, OUT> extends AbstractStreamOperator<OUT
 
             ActionTask.ActionTaskResult actionTaskResult =
                     actionTask.invoke(
-                            getRuntimeContext().getUserCodeClassLoader(),
-                            currentPythonActionExecutor());
+                            planManager.currentClassLoader(), currentPythonActionExecutor());
 
             // We remove the contexts from the map after the task is processed. They will be added
             // back later if the action task has a generated action task, meaning it is not
@@ -593,7 +591,8 @@ public class ActionExecutionOperator<IN, OUT> extends AbstractStreamOperator<OUT
             durableExecManager.checkNoInFlightActionContexts();
             contextManager.resetForPlanSwitch();
             planManager.closeCurrentResourcesForSwitch();
-            pythonBridge.activatePlan(nextPlan, planManager.pendingResourceCache());
+            pythonBridge.activatePlan(
+                    nextPlan, planManager.pendingResourceCache(), planManager.pendingClassLoader());
 
             planManager.switchToPending();
             durableExecManager.setActivePlanId(planManager.currentPlanId());

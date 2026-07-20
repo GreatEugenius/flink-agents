@@ -88,7 +88,6 @@ class PythonBridgeManager implements AutoCloseable {
     private FlinkAgentsMetricGroupImpl metricGroup;
     private Runnable mailboxThreadChecker;
     private String jobIdentifier;
-    private ClassLoader userCodeClassLoader;
 
     private boolean initialized;
 
@@ -121,9 +120,9 @@ class PythonBridgeManager implements AutoCloseable {
      * @param metricGroup the agent metric group, exposed to Python via the runner context.
      * @param mailboxThreadChecker hook used by the runner context to assert mailbox-thread access.
      * @param jobIdentifier the job identifier used to scope Python state.
-     * @param userCodeClassLoader the operator's user-code class loader, propagated to {@link
-     *     JavaResourceAdapter} so reflective Java tool resolution sees user jars added via {@code
-     *     env.add_jars(...)}.
+     * @param planClassLoader the effective plan class loader, propagated to {@link
+     *     JavaResourceAdapter} so reflective Java action and tool resolution sees both the job's
+     *     user jars and the current dynamic Java artifact.
      */
     void open(
             AgentPlan agentPlan,
@@ -135,7 +134,7 @@ class PythonBridgeManager implements AutoCloseable {
             FlinkAgentsMetricGroupImpl metricGroup,
             Runnable mailboxThreadChecker,
             String jobIdentifier,
-            ClassLoader userCodeClassLoader)
+            ClassLoader planClassLoader)
             throws Exception {
         this.executionConfig = executionConfig;
         this.distributedCache = distributedCache;
@@ -144,13 +143,13 @@ class PythonBridgeManager implements AutoCloseable {
         this.metricGroup = metricGroup;
         this.mailboxThreadChecker = mailboxThreadChecker;
         this.jobIdentifier = jobIdentifier;
-        this.userCodeClassLoader = userCodeClassLoader;
 
-        activeRuntime = createPlanRuntime(agentPlan, resourceCache);
+        activeRuntime = createPlanRuntime(agentPlan, resourceCache, planClassLoader);
     }
 
     @Nullable
-    private PlanPythonRuntime createPlanRuntime(AgentPlan agentPlan, ResourceCache resourceCache)
+    private PlanPythonRuntime createPlanRuntime(
+            AgentPlan agentPlan, ResourceCache resourceCache, ClassLoader planClassLoader)
             throws Exception {
         boolean containPythonAction = containsPythonAction(agentPlan);
         boolean containPythonResource = containsPythonResource(agentPlan);
@@ -172,7 +171,7 @@ class PythonBridgeManager implements AutoCloseable {
                             jobIdentifier);
             JavaResourceAdapter javaResourceAdapter =
                     new JavaResourceAdapter(
-                            resourceCache.getResourceContext(), interpreter, userCodeClassLoader);
+                            resourceCache.getResourceContext(), interpreter, planClassLoader);
 
             PythonResourceAdapterImpl pythonResourceAdapter = null;
             if (containPythonResource || mem0Configured) {
@@ -356,9 +355,11 @@ class PythonBridgeManager implements AutoCloseable {
      * <p>Any failure escapes the barrier. There is no local rollback after the old runtime has been
      * closed; the task must recover from the previous completed checkpoint.
      */
-    void activatePlan(AgentPlan newPlan, ResourceCache newResourceCache) throws Exception {
+    void activatePlan(
+            AgentPlan newPlan, ResourceCache newResourceCache, ClassLoader planClassLoader)
+            throws Exception {
         closeActiveRuntime();
-        activeRuntime = createPlanRuntime(newPlan, newResourceCache);
+        activeRuntime = createPlanRuntime(newPlan, newResourceCache, planClassLoader);
     }
 
     /** Stops old-plan async work before its interpreter and Java-side resources are released. */

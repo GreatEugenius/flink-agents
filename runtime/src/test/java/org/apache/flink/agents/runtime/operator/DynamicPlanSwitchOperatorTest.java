@@ -32,6 +32,7 @@ import org.apache.flink.agents.runtime.actionstate.ActionState;
 import org.apache.flink.agents.runtime.actionstate.InMemoryActionStateStore;
 import org.apache.flink.agents.runtime.operator.coordinator.PlanIds;
 import org.apache.flink.agents.runtime.operator.coordinator.PlanUpdateMessages.PlanUpdateEvent;
+import org.apache.flink.agents.runtime.python.utils.JavaResourceAdapter;
 import org.apache.flink.agents.runtime.python.utils.PythonActionExecutor;
 import org.apache.flink.api.common.typeinfo.TypeInformation;
 import org.apache.flink.api.java.functions.KeySelector;
@@ -42,12 +43,17 @@ import org.apache.flink.types.Row;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import javax.tools.JavaCompiler;
+import javax.tools.StandardJavaFileManager;
+import javax.tools.ToolProvider;
+
 import java.lang.reflect.Field;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.jar.JarEntry;
@@ -439,6 +445,87 @@ public class DynamicPlanSwitchOperatorTest {
     }
 
     @Test
+    void javaArtifactLoadsActionClassAbsentFromTheJobClasspath(@TempDir Path tempDir)
+            throws Exception {
+        String className = "user.dynamic.ExternalAction";
+        Path artifact = createExternalJavaActionJar(tempDir.resolve("v1"), className, 100L);
+
+        try (KeyedOneInputStreamOperatorTestHarness<Long, Long, Object> harness = harness()) {
+            harness.open();
+            ActionExecutionOperator<Long, Object> op = op(harness);
+
+            op.handleOperatorEvent(
+                    planUpdate(1L, json(externalJavaArtifactPlan(artifact, className))));
+            checkpoint(harness, 1L);
+            harness.processElement(new StreamRecord<>(1L));
+            op.waitInFlightEventsFinished();
+
+            assertThat(outputs(harness)).containsExactly(101L);
+        }
+    }
+
+    @Test
+    void restoredJavaArtifactPlanRecreatesItsClassLoader(@TempDir Path tempDir) throws Exception {
+        String className = "user.dynamic.ExternalAction";
+        Path artifact = createExternalJavaActionJar(tempDir.resolve("v2"), className, 200L);
+        OperatorSubtaskState snapshot;
+
+        try (KeyedOneInputStreamOperatorTestHarness<Long, Long, Object> harness = harness()) {
+            harness.open();
+            ActionExecutionOperator<Long, Object> op = op(harness);
+            op.handleOperatorEvent(
+                    planUpdate(1L, json(externalJavaArtifactPlan(artifact, className))));
+            snapshot = checkpoint(harness, 1L);
+        }
+
+        try (KeyedOneInputStreamOperatorTestHarness<Long, Long, Object> restored = harness()) {
+            restored.initializeState(snapshot);
+            restored.open();
+            ActionExecutionOperator<Long, Object> op = op(restored);
+            restored.processElement(new StreamRecord<>(1L));
+            op.waitInFlightEventsFinished();
+
+            assertThat(outputs(restored)).containsExactly(201L);
+        }
+    }
+
+    @Test
+    void pythonBridgeUsesTheActivePlanJavaArtifactClassLoaderAfterSwitchAndRestore(
+            @TempDir Path tempDir) throws Exception {
+        String className = "user.dynamic.ExternalAction";
+        Path artifact = createExternalJavaActionJar(tempDir.resolve("bridge"), className, 300L);
+        OperatorSubtaskState snapshot;
+
+        try (KeyedOneInputStreamOperatorTestHarness<Long, Row, Object> harness =
+                pythonWireHarness()) {
+            harness.open();
+            ActionExecutionOperator<Row, Object> op = rowOp(harness);
+            op.handleOperatorEvent(
+                    planUpdate(1L, json(externalJavaArtifactPlan(artifact, className))));
+            harness.prepareSnapshotPreBarrier(1L);
+            snapshot = harness.snapshot(1L, 1L);
+
+            Object result =
+                    javaResourceAdapter(pythonBridge(op))
+                            .invokeJavaAction(className, "probe", List.of(), List.of());
+
+            assertThat(result).isEqualTo(300L);
+        }
+
+        try (KeyedOneInputStreamOperatorTestHarness<Long, Row, Object> restored =
+                pythonWireHarness()) {
+            restored.initializeState(snapshot);
+            restored.open();
+
+            Object result =
+                    javaResourceAdapter(pythonBridge(rowOp(restored)))
+                            .invokeJavaAction(className, "probe", List.of(), List.of());
+
+            assertThat(result).isEqualTo(300L);
+        }
+    }
+
+    @Test
     void existingPythonActionCanSwitchWithoutAnArtifact() throws Exception {
         try (KeyedOneInputStreamOperatorTestHarness<Long, Long, Object> harness =
                 harness(pythonPlan("old_action"))) {
@@ -567,6 +654,16 @@ public class DynamicPlanSwitchOperatorTest {
         return (PythonBridgeManager) field.get(operator);
     }
 
+    private static JavaResourceAdapter javaResourceAdapter(PythonBridgeManager bridge)
+            throws Exception {
+        Field activeRuntimeField = PythonBridgeManager.class.getDeclaredField("activeRuntime");
+        activeRuntimeField.setAccessible(true);
+        Object activeRuntime = activeRuntimeField.get(bridge);
+        Field adapterField = activeRuntime.getClass().getDeclaredField("javaResourceAdapter");
+        adapterField.setAccessible(true);
+        return (JavaResourceAdapter) adapterField.get(activeRuntime);
+    }
+
     private static String json(AgentPlan plan) throws Exception {
         return OBJECT_MAPPER.writeValueAsString(plan);
     }
@@ -647,6 +744,26 @@ public class DynamicPlanSwitchOperatorTest {
         return plan;
     }
 
+    private static AgentPlan externalJavaArtifactPlan(Path artifactPath, String className)
+            throws Exception {
+        Action action =
+                new Action(
+                        "externalJavaAction",
+                        new JavaFunction(
+                                className,
+                                "execute",
+                                new Class<?>[] {Event.class, RunnerContext.class}),
+                        Collections.singletonList(InputEvent.EVENT_TYPE));
+        AgentPlan plan =
+                new AgentPlan(
+                        Map.of(action.getName(), action),
+                        Map.of(InputEvent.EVENT_TYPE, List.of(action)),
+                        new HashMap<>(),
+                        new AgentConfiguration());
+        configureJavaArtifact(plan, artifactPath);
+        return plan;
+    }
+
     private static void configureJavaArtifact(AgentPlan plan, Path artifactPath) throws Exception {
         plan.getConfig()
                 .setStr(PlanVersionManager.JAVA_ARTIFACT_PATH_CONFIG, artifactPath.toString());
@@ -656,6 +773,74 @@ public class DynamicPlanSwitchOperatorTest {
                         PlanIds.sha256HexOfFile(artifactPath));
     }
 
+    private static Path createExternalJavaActionJar(Path directory, String className, long addend)
+            throws Exception {
+        String packageName = className.substring(0, className.lastIndexOf('.'));
+        String simpleName = className.substring(className.lastIndexOf('.') + 1);
+        String source =
+                "package "
+                        + packageName
+                        + ";\n"
+                        + "import org.apache.flink.agents.api.Event;\n"
+                        + "import org.apache.flink.agents.api.InputEvent;\n"
+                        + "import org.apache.flink.agents.api.OutputEvent;\n"
+                        + "import org.apache.flink.agents.api.context.RunnerContext;\n"
+                        + "public class "
+                        + simpleName
+                        + " {\n"
+                        + "  public static void execute(Event event, RunnerContext context) {\n"
+                        + "    Long input = (Long) InputEvent.fromEvent(event).getInput();\n"
+                        + "    context.sendEvent(new OutputEvent(input + "
+                        + addend
+                        + "L));\n"
+                        + "  }\n"
+                        + "  public static long probe() { return "
+                        + addend
+                        + "L; }\n"
+                        + "}\n";
+
+        Path sourceRoot = directory.resolve("src");
+        Path classesRoot = directory.resolve("classes");
+        Path sourceFile =
+                sourceRoot.resolve(packageName.replace('.', '/')).resolve(simpleName + ".java");
+        Files.createDirectories(sourceFile.getParent());
+        Files.createDirectories(classesRoot);
+        Files.writeString(sourceFile, source, StandardCharsets.UTF_8);
+
+        JavaCompiler compiler = ToolProvider.getSystemJavaCompiler();
+        assertThat(compiler).as("JDK compiler must be available").isNotNull();
+        try (StandardJavaFileManager fileManager =
+                compiler.getStandardFileManager(null, null, StandardCharsets.UTF_8)) {
+            Boolean success =
+                    compiler.getTask(
+                                    null,
+                                    fileManager,
+                                    null,
+                                    List.of(
+                                            "-classpath",
+                                            testCompilerClasspath(),
+                                            "-d",
+                                            classesRoot.toString()),
+                                    null,
+                                    fileManager.getJavaFileObjects(sourceFile))
+                            .call();
+            assertThat(success).isTrue();
+        }
+
+        Path artifact = directory.resolve("external-action-" + addend + ".jar");
+        try (JarOutputStream jar = new JarOutputStream(Files.newOutputStream(artifact))) {
+            Path classFile =
+                    classesRoot
+                            .resolve(packageName.replace('.', '/'))
+                            .resolve(simpleName + ".class");
+            jar.putNextEntry(
+                    new JarEntry(packageName.replace('.', '/') + "/" + simpleName + ".class"));
+            Files.copy(classFile, jar);
+            jar.closeEntry();
+        }
+        return artifact;
+    }
+
     private static Path writeJavaArtifact(Path artifact, String marker) throws Exception {
         try (JarOutputStream jar = new JarOutputStream(Files.newOutputStream(artifact))) {
             jar.putNextEntry(new JarEntry("marker.txt"));
@@ -663,5 +848,25 @@ public class DynamicPlanSwitchOperatorTest {
             jar.closeEntry();
         }
         return artifact;
+    }
+
+    private static String testCompilerClasspath() throws Exception {
+        LinkedHashSet<String> entries = new LinkedHashSet<>();
+        addCodeSource(entries, Event.class);
+        addCodeSource(entries, InputEvent.class);
+        addCodeSource(entries, OutputEvent.class);
+        addCodeSource(entries, RunnerContext.class);
+        for (String entry :
+                System.getProperty("java.class.path").split(java.io.File.pathSeparator)) {
+            if (!entry.isEmpty()) {
+                entries.add(entry);
+            }
+        }
+        return String.join(java.io.File.pathSeparator, entries);
+    }
+
+    private static void addCodeSource(LinkedHashSet<String> entries, Class<?> clazz)
+            throws Exception {
+        entries.add(clazz.getProtectionDomain().getCodeSource().getLocation().toURI().getPath());
     }
 }

@@ -33,7 +33,10 @@ import org.slf4j.LoggerFactory;
 
 import javax.annotation.Nullable;
 
+import java.io.Closeable;
 import java.io.Serializable;
+import java.net.URL;
+import java.net.URLClassLoader;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.HashMap;
@@ -52,11 +55,12 @@ import static org.apache.flink.util.Preconditions.checkState;
  *
  * <p>Lifecycle of an update: {@link #preparePending} runs at event arrival on the mailbox thread —
  * it verifies the wire signature, deserializes the plan, pins the job-level configuration of the
- * bootstrap plan (only artifact coordinates are plan-scoped), and proves every Java action loadable
- * through the job's user-code classloader. Python runtime construction is deliberately deferred
- * until the activation barrier. Newest wins: preparing a newer update discards an unswitched older
- * pending. {@link #switchToPending} runs at {@code prepareSnapshotPreBarrier} after the operator
- * drained its in-flight chains and activated the pending runtime.
+ * bootstrap plan (only artifact coordinates are plan-scoped), builds the plan-scoped artifact
+ * classloader and proves every Java action loadable through it. Python runtime construction is
+ * deliberately deferred until the activation barrier. Newest wins: preparing a newer update
+ * discards an unswitched older pending. {@link #switchToPending} runs at {@code
+ * prepareSnapshotPreBarrier} after the operator drained its in-flight chains and activated the
+ * pending runtime.
  *
  * <p>Checkpointed fact: the current {@code (version, planId, canonicalPlanJson)} as union operator
  * state, one record per subtask. On restore every subtask picks the record with the highest
@@ -140,11 +144,16 @@ class PlanVersionManager {
 
     /**
      * Late wiring of the user-code classloader (available only from {@code open()}). A restored
-     * dynamic plan re-proves that its Java actions are still loadable before it can run.
+     * dynamic plan re-creates its artifact classloader here and re-proves that its Java action
+     * classes are loadable before it can run.
      */
     void open(Supplier<ClassLoader> userCodeClassLoader) throws Exception {
         this.userCodeClassLoader = userCodeClassLoader;
-        validateJavaActionsExecutable(current.plan, userCodeClassLoader.get());
+        if (current.version > 0 && current.classLoader == null) {
+            current.classLoader = createArtifactClassLoader(current.plan);
+        }
+        validateJavaActionsExecutable(
+                current.plan, current.classLoaderOrDefault(userCodeClassLoader.get()));
     }
 
     long currentPlanVersion() {
@@ -160,14 +169,13 @@ class PlanVersionManager {
     }
 
     ClassLoader currentClassLoader() {
-        return userCodeClassLoader.get();
+        return current.classLoaderOrDefault(userCodeClassLoader.get());
     }
 
     ResourceCache currentResourceCache() {
         if (current.resourceCache == null) {
             current.resourceCache =
-                    new ResourceCache(
-                            current.plan.getResourceProviders(), userCodeClassLoader.get());
+                    new ResourceCache(current.plan.getResourceProviders(), currentClassLoader());
         }
         return current.resourceCache;
     }
@@ -184,6 +192,11 @@ class PlanVersionManager {
     @Nullable
     ResourceCache pendingResourceCache() {
         return pending == null ? null : pending.resourceCache;
+    }
+
+    ClassLoader pendingClassLoader() {
+        checkState(pending != null, "No pending AgentPlan.");
+        return pending.classLoaderOrDefault(userCodeClassLoader.get());
     }
 
     /** An update is relevant only if newer than both the live plan and the waiting pending. */
@@ -214,9 +227,13 @@ class PlanVersionManager {
 
         PlanSlot prepared = new PlanSlot(version, planId, canonicalJsonOf(effective), effective);
         try {
-            validateJavaActionsExecutable(effective, userCodeClassLoader.get());
+            prepared.classLoader = createArtifactClassLoader(effective);
+            validateJavaActionsExecutable(
+                    effective, prepared.classLoaderOrDefault(userCodeClassLoader.get()));
             prepared.resourceCache =
-                    new ResourceCache(effective.getResourceProviders(), userCodeClassLoader.get());
+                    new ResourceCache(
+                            effective.getResourceProviders(),
+                            prepared.classLoaderOrDefault(userCodeClassLoader.get()));
         } catch (Exception e) {
             prepared.close();
             throw e;
@@ -336,6 +353,18 @@ class PlanVersionManager {
         }
     }
 
+    @Nullable
+    private ClassLoader createArtifactClassLoader(AgentPlan plan) throws Exception {
+        validateJavaArtifactMetadata(plan);
+        String artifactPath = normalizedConfigValue(plan, JAVA_ARTIFACT_PATH_CONFIG);
+        if (artifactPath == null) {
+            return null;
+        }
+        Path path = Path.of(artifactPath);
+        return new PlanArtifactClassLoader(
+                new URL[] {path.toUri().toURL()}, userCodeClassLoader.get());
+    }
+
     private static void validateJavaArtifactMetadata(AgentPlan plan) throws Exception {
         String artifactPath = normalizedConfigValue(plan, JAVA_ARTIFACT_PATH_CONFIG);
         String expectedSha256 = normalizedConfigValue(plan, JAVA_ARTIFACT_SHA256_CONFIG);
@@ -412,6 +441,7 @@ class PlanVersionManager {
         final String planId;
         private final String canonicalPlanJson;
         final AgentPlan plan;
+        @Nullable ClassLoader classLoader;
         @Nullable ResourceCache resourceCache;
 
         PlanSlot(long version, String planId, String canonicalPlanJson, AgentPlan plan) {
@@ -422,10 +452,34 @@ class PlanVersionManager {
             this.plan = plan;
         }
 
+        ClassLoader classLoaderOrDefault(ClassLoader fallback) {
+            return classLoader != null ? classLoader : fallback;
+        }
+
         void close() throws Exception {
+            Exception firstException = null;
             if (resourceCache != null) {
-                resourceCache.close();
+                try {
+                    resourceCache.close();
+                } catch (Exception e) {
+                    firstException = e;
+                }
                 resourceCache = null;
+            }
+            if (classLoader instanceof Closeable) {
+                try {
+                    ((Closeable) classLoader).close();
+                } catch (Exception e) {
+                    if (firstException == null) {
+                        firstException = e;
+                    } else {
+                        firstException.addSuppressed(e);
+                    }
+                }
+                classLoader = null;
+            }
+            if (firstException != null) {
+                throw firstException;
             }
         }
     }
@@ -443,6 +497,48 @@ class PlanVersionManager {
             this.version = version;
             this.planId = planId;
             this.canonicalPlanJson = canonicalPlanJson;
+        }
+    }
+
+    private static final class PlanArtifactClassLoader extends URLClassLoader {
+        static {
+            registerAsParallelCapable();
+        }
+
+        private PlanArtifactClassLoader(URL[] urls, ClassLoader parent) {
+            super(urls, parent);
+        }
+
+        @Override
+        protected Class<?> loadClass(String name, boolean resolve) throws ClassNotFoundException {
+            synchronized (getClassLoadingLock(name)) {
+                Class<?> loaded = findLoadedClass(name);
+                if (loaded == null) {
+                    if (isParentFirstClass(name)) {
+                        loaded = super.loadClass(name, false);
+                    } else {
+                        try {
+                            loaded = findClass(name);
+                        } catch (ClassNotFoundException ignored) {
+                            loaded = super.loadClass(name, false);
+                        }
+                    }
+                }
+                if (resolve) {
+                    resolveClass(loaded);
+                }
+                return loaded;
+            }
+        }
+
+        private static boolean isParentFirstClass(String name) {
+            return name.startsWith("java.")
+                    || name.startsWith("javax.")
+                    || name.startsWith("jakarta.")
+                    || name.startsWith("sun.")
+                    || name.startsWith("com.sun.")
+                    || name.startsWith("org.apache.flink.")
+                    || name.startsWith("org.slf4j.");
         }
     }
 }

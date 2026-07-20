@@ -34,8 +34,12 @@ import org.slf4j.LoggerFactory;
 import javax.annotation.Nullable;
 
 import java.io.Serializable;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.HashMap;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.function.Supplier;
 
@@ -205,6 +209,8 @@ class PlanVersionManager {
                 planId);
         AgentPlan received = OBJECT_MAPPER.readValue(canonicalPlanJson, AgentPlan.class);
         AgentPlan effective = withBootstrapConfig(received);
+        validateJavaArtifactMetadata(effective);
+        validateJavaArtifactTransition(current.plan, effective);
 
         PlanSlot prepared = new PlanSlot(version, planId, canonicalJsonOf(effective), effective);
         try {
@@ -216,6 +222,13 @@ class PlanVersionManager {
             throw e;
         }
         pending = prepared;
+    }
+
+    /** Re-validates the pending Java artifact at the last safe point before switching plans. */
+    void validatePendingJavaArtifact() throws Exception {
+        checkState(pending != null, "No pending AgentPlan to validate.");
+        validateJavaArtifactMetadata(pending.plan);
+        validateJavaArtifactTransition(current.plan, pending.plan);
     }
 
     /** Drops the pending plan and closes resources prepared for it. */
@@ -321,6 +334,76 @@ class PlanVersionManager {
                 Class.forName(function.getQualName(), false, classLoader);
             }
         }
+    }
+
+    private static void validateJavaArtifactMetadata(AgentPlan plan) throws Exception {
+        String artifactPath = normalizedConfigValue(plan, JAVA_ARTIFACT_PATH_CONFIG);
+        String expectedSha256 = normalizedConfigValue(plan, JAVA_ARTIFACT_SHA256_CONFIG);
+        checkState(
+                (artifactPath == null) == (expectedSha256 == null),
+                "%s and %s must be configured together.",
+                JAVA_ARTIFACT_PATH_CONFIG,
+                JAVA_ARTIFACT_SHA256_CONFIG);
+        if (artifactPath == null) {
+            return;
+        }
+
+        Path path = Path.of(artifactPath);
+        checkState(
+                Files.isRegularFile(path),
+                "Java artifact path %s is not a readable file.",
+                artifactPath);
+        checkState(
+                expectedSha256.matches("(?i)[0-9a-f]{64}"),
+                "%s must contain exactly 64 hexadecimal characters.",
+                JAVA_ARTIFACT_SHA256_CONFIG);
+        String actual = PlanIds.sha256HexOfFile(path);
+        checkState(
+                actual.equalsIgnoreCase(expectedSha256),
+                "Java artifact %s failed sha256 verification: expected %s but was %s.",
+                artifactPath,
+                expectedSha256,
+                actual);
+    }
+
+    private static void validateJavaArtifactTransition(AgentPlan currentPlan, AgentPlan newPlan) {
+        String currentArtifactPath = normalizedConfigValue(currentPlan, JAVA_ARTIFACT_PATH_CONFIG);
+        String newArtifactPath = normalizedConfigValue(newPlan, JAVA_ARTIFACT_PATH_CONFIG);
+        if (sameConfiguredPath(currentArtifactPath, newArtifactPath)) {
+            String currentSha = normalizedSha(currentPlan);
+            String newSha = normalizedSha(newPlan);
+            checkState(
+                    Objects.equals(currentSha, newSha),
+                    "%s is immutable; use a new path for a different digest: %s.",
+                    JAVA_ARTIFACT_PATH_CONFIG,
+                    currentArtifactPath);
+        }
+    }
+
+    private static boolean sameConfiguredPath(
+            @Nullable String currentPath, @Nullable String newPath) {
+        if (currentPath == null || newPath == null) {
+            return false;
+        }
+        try {
+            Path current = Path.of(currentPath).toAbsolutePath().normalize();
+            Path next = Path.of(newPath).toAbsolutePath().normalize();
+            return current.equals(next) || Files.isSameFile(current, next);
+        } catch (Exception ignored) {
+            return currentPath.equals(newPath);
+        }
+    }
+
+    @Nullable
+    private static String normalizedSha(AgentPlan plan) {
+        String sha = normalizedConfigValue(plan, JAVA_ARTIFACT_SHA256_CONFIG);
+        return sha == null ? null : sha.toLowerCase(Locale.ROOT);
+    }
+
+    @Nullable
+    private static String normalizedConfigValue(AgentPlan plan, String key) {
+        String configured = plan.getConfig().getStr(key, null);
+        return configured == null || configured.trim().isEmpty() ? null : configured.trim();
     }
 
     /** One plan version and the plan-scoped resources tied to it. */

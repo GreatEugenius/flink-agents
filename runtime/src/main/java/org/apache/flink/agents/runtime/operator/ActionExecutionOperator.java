@@ -581,6 +581,10 @@ public class ActionExecutionOperator<IN, OUT> extends AbstractStreamOperator<OUT
 
             AgentPlan nextPlan = planManager.pendingPlan();
 
+            // Verify the content-addressed artifact again after drain and immediately before
+            // dismantling the current runtime.
+            planManager.validatePendingJavaArtifact();
+
             // Runner contexts and ResourceCache may hold Python references. Quiesce the Python
             // executor, release the Java context, close Java-side resources while the old
             // interpreter is still alive, and only then construct the next runtime. No input can

@@ -22,6 +22,8 @@ import com.fasterxml.jackson.databind.json.JsonMapper;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 
@@ -53,6 +55,11 @@ public final class PlanIds {
     /** sha256 hex over the exact JSON string bytes (UTF-8). */
     public static String planIdOf(String json) {
         return sha256Hex(json.getBytes(StandardCharsets.UTF_8));
+    }
+
+    /** sha256 hex of a local file's contents; used to verify plan artifacts before loading. */
+    public static String sha256HexOfFile(Path path) throws IOException {
+        return sha256Hex(Files.readAllBytes(path));
     }
 
     public static String sha256Hex(byte[] bytes) {

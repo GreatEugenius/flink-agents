@@ -40,12 +40,18 @@ import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
 import org.apache.flink.streaming.util.KeyedOneInputStreamOperatorTestHarness;
 import org.apache.flink.types.Row;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 import java.lang.reflect.Field;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.jar.JarEntry;
+import java.util.jar.JarOutputStream;
 import java.util.stream.Collectors;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -329,7 +335,7 @@ public class DynamicPlanSwitchOperatorTest {
     }
 
     @Test
-    void updateConfigIsPinnedToBootstrapPlan() throws Exception {
+    void updateConfigIsPinnedToBootstrapPlan(@TempDir Path tempDir) throws Exception {
         try (KeyedOneInputStreamOperatorTestHarness<Long, Long, Object> harness = harness()) {
             harness.open();
             ActionExecutionOperator<Long, Object> op = op(harness);
@@ -338,10 +344,8 @@ public class DynamicPlanSwitchOperatorTest {
             newPlan.getConfig().setStr("job-identifier", "attempted-override");
             newPlan.getConfig().setInt("num-async-threads", 1);
             newPlan.getConfig().setStr("update-only-key", "ignored");
-            newPlan.getConfig()
-                    .setStr(PlanVersionManager.JAVA_ARTIFACT_PATH_CONFIG, "/tmp/plan-v1.jar");
-            newPlan.getConfig()
-                    .setStr(PlanVersionManager.JAVA_ARTIFACT_SHA256_CONFIG, "artifact-digest");
+            Path artifact = writeJavaArtifact(tempDir.resolve("plan-v1.jar"), "v1");
+            configureJavaArtifact(newPlan, artifact);
             op.handleOperatorEvent(planUpdate(1L, json(newPlan)));
             checkpoint(harness, 1L);
 
@@ -352,9 +356,85 @@ public class DynamicPlanSwitchOperatorTest {
             assertThat(effective.getInt("num-async-threads", -1)).isEqualTo(-1);
             assertThat(effective.getStr("update-only-key", null)).isNull();
             assertThat(effective.getStr(PlanVersionManager.JAVA_ARTIFACT_PATH_CONFIG, null))
-                    .isEqualTo("/tmp/plan-v1.jar");
+                    .isEqualTo(artifact.toString());
             assertThat(effective.getStr(PlanVersionManager.JAVA_ARTIFACT_SHA256_CONFIG, null))
-                    .isEqualTo("artifact-digest");
+                    .isEqualTo(PlanIds.sha256HexOfFile(artifact));
+        }
+    }
+
+    @Test
+    void javaArtifactPathAndShaMustBeConfiguredTogether(@TempDir Path tempDir) throws Exception {
+        Path artifact = writeJavaArtifact(tempDir.resolve("user-actions.jar"), "v1");
+
+        AgentPlan pathOnly = singleActionPlan("newAction");
+        pathOnly.getConfig()
+                .setStr(PlanVersionManager.JAVA_ARTIFACT_PATH_CONFIG, artifact.toString());
+        AgentPlan shaOnly = singleActionPlan("newAction");
+        shaOnly.getConfig()
+                .setStr(
+                        PlanVersionManager.JAVA_ARTIFACT_SHA256_CONFIG,
+                        PlanIds.sha256HexOfFile(artifact));
+
+        for (AgentPlan invalidPlan : List.of(pathOnly, shaOnly)) {
+            try (KeyedOneInputStreamOperatorTestHarness<Long, Long, Object> harness = harness()) {
+                harness.open();
+                ActionExecutionOperator<Long, Object> op = op(harness);
+
+                assertThatThrownBy(() -> op.handleOperatorEvent(planUpdate(1L, json(invalidPlan))))
+                        .hasMessageContaining("must be configured together");
+
+                assertThat(op.hasPendingPlanForTesting()).isFalse();
+                assertThat(op.getCurrentPlanVersionForTesting()).isZero();
+            }
+        }
+    }
+
+    @Test
+    void javaArtifactTamperedAfterPrepareFailsAtTheActivationBarrier(@TempDir Path tempDir)
+            throws Exception {
+        Path artifact = writeJavaArtifact(tempDir.resolve("user-actions.jar"), "v1");
+        AgentPlan newPlan = javaArtifactPlan(artifact);
+
+        try (KeyedOneInputStreamOperatorTestHarness<Long, Long, Object> harness = harness()) {
+            harness.open();
+            ActionExecutionOperator<Long, Object> op = op(harness);
+
+            op.handleOperatorEvent(planUpdate(1L, json(newPlan)));
+            assertThat(op.hasPendingPlanForTesting()).isTrue();
+            writeJavaArtifact(artifact, "tampered-after-prepare");
+
+            assertThatThrownBy(() -> checkpoint(harness, 1L))
+                    .hasMessageContaining("failed sha256 verification")
+                    .hasMessageContaining(artifact.toString());
+        }
+    }
+
+    @Test
+    void javaArtifactCannotChangeDigestAtTheSamePath(@TempDir Path tempDir) throws Exception {
+        Path artifact = writeJavaArtifact(tempDir.resolve("user-actions.jar"), "v1");
+        AgentPlan versionOne = javaArtifactPlan(artifact);
+        String versionOneDigest =
+                versionOne.getConfig().getStr(PlanVersionManager.JAVA_ARTIFACT_SHA256_CONFIG, null);
+
+        try (KeyedOneInputStreamOperatorTestHarness<Long, Long, Object> harness = harness()) {
+            harness.open();
+            ActionExecutionOperator<Long, Object> op = op(harness);
+            op.handleOperatorEvent(planUpdate(1L, json(versionOne)));
+            checkpoint(harness, 1L);
+
+            writeJavaArtifact(artifact, "v2");
+            AgentPlan versionTwo = javaArtifactPlan(artifact);
+            assertThat(
+                            versionTwo
+                                    .getConfig()
+                                    .getStr(PlanVersionManager.JAVA_ARTIFACT_SHA256_CONFIG, null))
+                    .isNotEqualTo(versionOneDigest);
+
+            assertThatThrownBy(() -> op.handleOperatorEvent(planUpdate(2L, json(versionTwo))))
+                    .hasMessageContaining("is immutable");
+
+            assertThat(op.hasPendingPlanForTesting()).isFalse();
+            assertThat(op.getCurrentPlanVersionForTesting()).isEqualTo(1L);
         }
     }
 
@@ -559,5 +639,29 @@ public class DynamicPlanSwitchOperatorTest {
                 Map.of(InputEvent.EVENT_TYPE, List.of(action)),
                 new HashMap<>(),
                 config);
+    }
+
+    private static AgentPlan javaArtifactPlan(Path artifactPath) throws Exception {
+        AgentPlan plan = singleActionPlan("newAction");
+        configureJavaArtifact(plan, artifactPath);
+        return plan;
+    }
+
+    private static void configureJavaArtifact(AgentPlan plan, Path artifactPath) throws Exception {
+        plan.getConfig()
+                .setStr(PlanVersionManager.JAVA_ARTIFACT_PATH_CONFIG, artifactPath.toString());
+        plan.getConfig()
+                .setStr(
+                        PlanVersionManager.JAVA_ARTIFACT_SHA256_CONFIG,
+                        PlanIds.sha256HexOfFile(artifactPath));
+    }
+
+    private static Path writeJavaArtifact(Path artifact, String marker) throws Exception {
+        try (JarOutputStream jar = new JarOutputStream(Files.newOutputStream(artifact))) {
+            jar.putNextEntry(new JarEntry("marker.txt"));
+            jar.write(marker.getBytes(StandardCharsets.UTF_8));
+            jar.closeEntry();
+        }
+        return artifact;
     }
 }

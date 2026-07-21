@@ -145,7 +145,7 @@ java_tests() {
         done
         dist_modules="${dist_modules#,}"
 
-        mvn --batch-mode --no-transfer-progress install -pl "$dist_modules" -DskipTests ${SPOTLESS_FLAG}
+        mvn --batch-mode --no-transfer-progress clean install -pl "$dist_modules" -am -DskipTests ${SPOTLESS_FLAG}
         install_code=$?
         if [ $install_code -ne 0 ]; then
             echo "Failed to install dist packages" >&2
@@ -155,7 +155,7 @@ java_tests() {
         local all_passed=true
         for version in "${flink_versions[@]}"; do
             echo "Running E2E tests for Flink ${version}..."
-            mvn --batch-mode --no-transfer-progress test -pl 'e2e-test/flink-agents-end-to-end-tests-integration' -Pflink-${version} -Dsurefire.rerunFailingTestsCount=2 ${SPOTLESS_FLAG}
+            mvn --batch-mode --no-transfer-progress clean test -pl 'e2e-test/flink-agents-end-to-end-tests-integration' -Pflink-${version} -Dsurefire.rerunFailingTestsCount=2 ${SPOTLESS_FLAG}
 
             if [ $? -ne 0 ]; then
                 echo "E2E tests failed for Flink ${version}" >&2

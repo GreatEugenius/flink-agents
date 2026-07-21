@@ -43,6 +43,22 @@ public interface AgentBuilder {
     AgentBuilder apply(Agent agent);
 
     /**
+     * Set an agent with a stable deployment name.
+     *
+     * <p>The deployment name identifies the agent operator in the Flink topology and is also used
+     * by clients that update its plan. Implementations that support named deployment override this
+     * method.
+     *
+     * @param agentName Stable name of this deployed agent.
+     * @param agent The agent user defined to run in execution environment.
+     * @return A configured AgentBuilder for method chaining.
+     */
+    default AgentBuilder apply(String agentName, Agent agent) {
+        throw new UnsupportedOperationException(
+                "apply(String, Agent) is not supported by this AgentBuilder.");
+    }
+
+    /**
      * Apply an agent previously registered on the environment (typically via {@code
      * env.loadYaml(...)}) by name.
      *

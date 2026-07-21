@@ -133,6 +133,7 @@ public class RemoteExecutionEnvironment extends AgentsExecutionEnvironment {
         private final Map<String, Agent> agents;
 
         private AgentPlan agentPlan;
+        private String agentName;
         private DataStream<Object> outputDataStream;
 
         // Constructor for DataStream input
@@ -181,9 +182,21 @@ public class RemoteExecutionEnvironment extends AgentsExecutionEnvironment {
 
         @Override
         public AgentBuilder apply(Agent agent) {
+            String defaultName = agent.getClass().getSimpleName();
+            if (defaultName.isEmpty()) {
+                throw new IllegalArgumentException(
+                        "An anonymous agent requires an explicit agent name via apply(name, agent).");
+            }
+            return apply(defaultName, agent);
+        }
+
+        @Override
+        public AgentBuilder apply(String agentName, Agent agent) {
+            CompileUtils.validateAgentName(agentName);
             try {
                 // Inspect resources registered in environment to agent.
                 agent.addResourcesIfAbsent(resources);
+                this.agentName = agentName;
                 this.agentPlan = new AgentPlan(agent, config);
                 return this;
             } catch (Exception e) {
@@ -201,7 +214,7 @@ public class RemoteExecutionEnvironment extends AgentsExecutionEnvironment {
                                 + "'; no agent with that name is registered on the environment. "
                                 + "Did you forget to call env.loadYaml(...) or env.getAgents().put(...) first?");
             }
-            return apply(agent);
+            return apply(agentName, agent);
         }
 
         @Override
@@ -219,11 +232,13 @@ public class RemoteExecutionEnvironment extends AgentsExecutionEnvironment {
             if (outputDataStream == null) {
                 if (keySelector != null) {
                     outputDataStream =
-                            CompileUtils.connectToAgent(inputDataStream, keySelector, agentPlan);
+                            CompileUtils.connectToAgent(
+                                    inputDataStream, keySelector, agentName, agentPlan);
                 } else {
                     // If no key selector provided, use a simple pass-through key selector
                     outputDataStream =
-                            CompileUtils.connectToAgent(inputDataStream, x -> x, agentPlan);
+                            CompileUtils.connectToAgent(
+                                    inputDataStream, x -> x, agentName, agentPlan);
                 }
             }
 

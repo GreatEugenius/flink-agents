@@ -17,9 +17,12 @@
  */
 package org.apache.flink.agents.runtime.env;
 
+import org.apache.flink.agents.api.AgentBuilder;
 import org.apache.flink.agents.api.AgentsExecutionEnvironment;
+import org.apache.flink.agents.api.agents.Agent;
 import org.apache.flink.agents.plan.AgentConfiguration;
 import org.apache.flink.api.common.JobExecutionResult;
+import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -95,4 +98,83 @@ public class RemoteExecutionEnvironmentTest {
 
         verify(flinkEnv).execute(customJobName);
     }
+
+    @Test
+    void applyUsesAgentSimpleClassNameAsDeploymentName() {
+        StreamExecutionEnvironment flinkEnv = StreamExecutionEnvironment.getExecutionEnvironment();
+        AgentsExecutionEnvironment agentsEnv =
+                AgentsExecutionEnvironment.getExecutionEnvironment(flinkEnv);
+
+        DataStream<Object> output =
+                agentsEnv
+                        .fromDataStream(flinkEnv.fromData(1L).keyBy(value -> value))
+                        .apply(new NamedAgent())
+                        .toDataStream();
+
+        assertDeploymentIdentity(output, "NamedAgent");
+    }
+
+    @Test
+    void applyAllowsExplicitDeploymentName() {
+        StreamExecutionEnvironment flinkEnv = StreamExecutionEnvironment.getExecutionEnvironment();
+        AgentsExecutionEnvironment agentsEnv =
+                AgentsExecutionEnvironment.getExecutionEnvironment(flinkEnv);
+
+        DataStream<Object> output =
+                agentsEnv
+                        .fromDataStream(flinkEnv.fromData(1L).keyBy(value -> value))
+                        .apply("review-agent", new NamedAgent())
+                        .toDataStream();
+
+        assertDeploymentIdentity(output, "review-agent");
+    }
+
+    @Test
+    void applyRegisteredAgentUsesRegistryNameAsDeploymentName() {
+        StreamExecutionEnvironment flinkEnv = StreamExecutionEnvironment.getExecutionEnvironment();
+        AgentsExecutionEnvironment agentsEnv =
+                AgentsExecutionEnvironment.getExecutionEnvironment(flinkEnv);
+        agentsEnv.getAgents().put("yaml-agent", new NamedAgent());
+
+        DataStream<Object> output =
+                agentsEnv
+                        .fromDataStream(flinkEnv.fromData(1L).keyBy(value -> value))
+                        .apply("yaml-agent")
+                        .toDataStream();
+
+        assertDeploymentIdentity(output, "yaml-agent");
+    }
+
+    @Test
+    void applyRejectsBlankExplicitDeploymentName() {
+        StreamExecutionEnvironment flinkEnv = StreamExecutionEnvironment.getExecutionEnvironment();
+        AgentBuilder builder =
+                AgentsExecutionEnvironment.getExecutionEnvironment(flinkEnv)
+                        .fromDataStream(flinkEnv.fromData(1L).keyBy(value -> value));
+
+        assertThatThrownBy(() -> builder.apply("  ", new NamedAgent()))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("agent name");
+    }
+
+    @Test
+    void applyRejectsAnonymousAgentWithoutExplicitDeploymentName() {
+        StreamExecutionEnvironment flinkEnv = StreamExecutionEnvironment.getExecutionEnvironment();
+        AgentBuilder builder =
+                AgentsExecutionEnvironment.getExecutionEnvironment(flinkEnv)
+                        .fromDataStream(flinkEnv.fromData(1L).keyBy(value -> value));
+
+        assertThatThrownBy(() -> builder.apply(new Agent() {}))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("explicit agent name");
+    }
+
+    private static void assertDeploymentIdentity(DataStream<Object> output, String agentName) {
+        assertThat(output.getTransformation().getUid())
+                .isEqualTo("flink-agents-coordinated-operator:" + agentName);
+        assertThat(output.getTransformation().getName())
+                .isEqualTo("coordinated-action-execute-operator:" + agentName);
+    }
+
+    private static final class NamedAgent extends Agent {}
 }

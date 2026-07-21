@@ -19,7 +19,7 @@ import importlib
 from abc import ABC, abstractmethod
 from typing import Any, Dict
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PrivateAttr
 
 from flink_agents.api.resource import (
     Resource,
@@ -29,6 +29,7 @@ from flink_agents.api.resource import (
     get_resource_class,
 )
 from flink_agents.api.resource_context import ResourceContext
+from flink_agents.plan import module_namespace
 from flink_agents.plan.configuration import AgentConfiguration
 
 
@@ -46,6 +47,9 @@ class ResourceProvider(BaseModel, ABC):
 
     name: str
     type: ResourceType
+    _module_namespace: str | None = PrivateAttr(
+        default_factory=module_namespace.current
+    )
 
     @abstractmethod
     def provide(
@@ -108,6 +112,13 @@ class PythonResourceProvider(ResourceProvider):
         self, resource_context: ResourceContext, config: AgentConfiguration
     ) -> Resource:
         """Create resource in runtime."""
+        if self._module_namespace is not None and self.descriptor._clazz is None:
+            module = importlib.import_module(
+                module_namespace.qualify(
+                    self._module_namespace, self.descriptor.target_module
+                )
+            )
+            self.descriptor._clazz = getattr(module, self.descriptor.target_clazz)
         cls = self.descriptor.clazz
 
         final_kwargs = {}
@@ -154,10 +165,13 @@ class PythonSerializableResourceProvider(SerializableResourceProvider):
     ) -> Resource:
         """Get or deserialize resource in runtime."""
         if self.resource is None:
-            module = importlib.import_module(self.module)
+            module = importlib.import_module(
+                module_namespace.qualify(self._module_namespace, self.module)
+            )
             clazz = getattr(module, self.clazz)
             self.serialized["resource_context"] = resource_context
-            self.resource = clazz.model_validate(self.serialized)
+            with module_namespace.bind(self._module_namespace):
+                self.resource = clazz.model_validate(self.serialized)
         return self.resource
 
 

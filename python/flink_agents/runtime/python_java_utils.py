@@ -36,6 +36,7 @@ from flink_agents.api.vector_stores.vector_store import (
     VectorStoreQuery,
     VectorStoreQueryMode,
 )
+from flink_agents.plan import module_namespace
 from flink_agents.plan.resource_provider import JAVA_RESOURCE_MAPPING
 from flink_agents.runtime.java.java_resource_wrapper import (
     JavaPrompt,
@@ -77,7 +78,10 @@ def get_output_from_output_event(event_json: str) -> Any:
 
 
 def create_resource(
-    resource_module: str, resource_clazz: str, func_kwargs: Dict[str, Any]
+    resource_module: str,
+    resource_clazz: str,
+    func_kwargs: Dict[str, Any],
+    namespace: str | None = None,
 ) -> Resource:
     """Dynamically create a resource instance from module and class name.
 
@@ -85,11 +89,14 @@ def create_resource(
         resource_module: The module path containing the resource class
         resource_clazz: The class name to instantiate
         func_kwargs: Keyword arguments to pass to the class constructor
+        namespace: Optional plan-version module namespace
 
     Returns:
         Resource: An instance of the specified resource class
     """
-    module = importlib.import_module(resource_module)
+    module = importlib.import_module(
+        module_namespace.qualify(namespace, resource_module)
+    )
     cls = getattr(module, resource_clazz)
     return cls(**func_kwargs)
 
@@ -128,7 +135,10 @@ def from_java_tool(j_tool: Any) -> JavaTool:
 
 
 def get_python_tool_metadata(
-    module: str, qual_name: str, injected_args: list[str] | None = None
+    module: str,
+    qual_name: str,
+    injected_args: list[str] | None = None,
+    namespace: str | None = None,
 ) -> Dict[str, str]:
     """Introspect a Python callable into the flat tool-metadata shape expected by
     the Java-side ``PythonResourceAdapter.getPythonToolMetadata``.
@@ -151,7 +161,9 @@ def get_python_tool_metadata(
         create_schema_from_function,
     )
 
-    descriptor = PythonFunction(module=module, qualname=qual_name)
+    descriptor = PythonFunction(
+        module=module_namespace.qualify(namespace, module), qualname=qual_name
+    )
     callable_ = descriptor.as_callable()
     name = callable_.__name__
     description = (parse(callable_.__doc__).description or "") if callable_.__doc__ else ""
@@ -178,7 +190,10 @@ def _dump_injected_args(injected_args: Dict[str, Any]) -> str:
 
 
 def invoke_python_tool(
-    module: str, qual_name: str, kwargs: Dict[str, Any]
+    module: str,
+    qual_name: str,
+    kwargs: Dict[str, Any],
+    namespace: str | None = None,
 ) -> Any:
     """Invoke a Python callable as a tool, passing the provided keyword arguments.
 
@@ -188,7 +203,9 @@ def invoke_python_tool(
     """
     from flink_agents.api.function import PythonFunction
 
-    descriptor = PythonFunction(module=module, qualname=qual_name)
+    descriptor = PythonFunction(
+        module=module_namespace.qualify(namespace, module), qualname=qual_name
+    )
     return descriptor.as_callable()(**kwargs)
 
 

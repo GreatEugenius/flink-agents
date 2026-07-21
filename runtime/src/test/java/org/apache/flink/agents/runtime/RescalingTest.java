@@ -321,6 +321,7 @@ public class RescalingTest extends TestLogger {
         input =
                 CompileUtils.connectToAgent(
                                 (KeyedStream<Integer, Integer>) input,
+                                "TestAgent",
                                 new AgentPlan(new TestAgent()))
                         .map(
                                 new MapFunction<Object, Integer>() {

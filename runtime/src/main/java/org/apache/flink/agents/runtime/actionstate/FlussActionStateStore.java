@@ -189,10 +189,18 @@ public class FlussActionStateStore implements ActionStateStore {
                 tableName);
     }
 
+    // Null only before an owner selects a plan scope (for standalone store use).
+    private volatile String activePlanId;
+
+    @Override
+    public void setActivePlanId(String planId) {
+        this.activePlanId = Preconditions.checkNotNull(planId, "planId must not be null");
+    }
+
     @Override
     public void put(Object key, long seqNum, Action action, Event event, ActionState state)
             throws Exception {
-        String stateKey = generateKey(key, seqNum, action, event);
+        String stateKey = generateKey(key, seqNum, action, event, activePlanId);
         byte[] payload = ActionStateSerde.serialize(state);
 
         GenericRow row =
@@ -214,13 +222,13 @@ public class FlussActionStateStore implements ActionStateStore {
 
     @Override
     public ActionState get(Object key, long seqNum, Action action, Event event) throws Exception {
-        String stateKey = generateKey(key, seqNum, action, event);
+        String stateKey = generateKey(key, seqNum, action, event, activePlanId);
         String keyPrefix = key.toString() + "_";
 
         boolean hasDivergence = checkDivergence(key.toString(), seqNum);
 
         if (!actionStates.containsKey(stateKey) || hasDivergence) {
-            removeStateEntries(keyPrefix, stateSeqNum -> stateSeqNum > seqNum);
+            removeStateEntries(keyPrefix, stateSeqNum -> stateSeqNum > seqNum, true);
         }
 
         ActionState state = actionStates.get(stateKey);
@@ -231,8 +239,16 @@ public class FlussActionStateStore implements ActionStateStore {
     private boolean checkDivergence(String key, long seqNum) {
         return actionStates.keySet().stream()
                         .filter(k -> k.startsWith(key + "_" + seqNum + "_"))
+                        .filter(this::isInActivePlanScope)
                         .count()
                 > 1;
+    }
+
+    private boolean isInActivePlanScope(String stateKey) {
+        if (activePlanId == null) {
+            return ActionStateUtil.parseKey(stateKey).size() == 4;
+        }
+        return stateKey.endsWith("_" + activePlanId);
     }
 
     /**
@@ -240,11 +256,17 @@ public class FlussActionStateStore implements ActionStateStore {
      * sequence number satisfies {@code seqNumFilter}.
      */
     private void removeStateEntries(String keyPrefix, LongPredicate seqNumFilter) {
+        removeStateEntries(keyPrefix, seqNumFilter, false);
+    }
+
+    private void removeStateEntries(
+            String keyPrefix, LongPredicate seqNumFilter, boolean activePlanOnly) {
         actionStates
                 .entrySet()
                 .removeIf(
                         entry -> {
-                            if (!entry.getKey().startsWith(keyPrefix)) {
+                            if (!entry.getKey().startsWith(keyPrefix)
+                                    || (activePlanOnly && !isInActivePlanScope(entry.getKey()))) {
                                 return false;
                             }
                             try {

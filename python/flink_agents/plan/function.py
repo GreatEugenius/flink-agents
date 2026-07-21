@@ -20,10 +20,12 @@ import importlib
 import inspect
 import logging
 from abc import ABC, abstractmethod
-from typing import Any, Callable, Dict, List, Tuple, get_type_hints
+from contextlib import contextmanager
+from typing import Any, Callable, Dict, Iterable, List, Tuple, get_type_hints
 
 from pydantic import BaseModel, PrivateAttr, model_serializer
 
+from flink_agents.plan import module_namespace
 from flink_agents.plan.utils import check_type_match
 
 # Global cache for PythonFunction instances to avoid repeated creation
@@ -33,6 +35,28 @@ logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
+
+
+@contextmanager
+def bind_python_module_namespace(namespace: str | None) -> Iterable[None]:
+    """Bind the namespace used by plan descriptors created in this context."""
+    with module_namespace.bind(namespace):
+        yield
+
+
+def acquire_python_module_namespace(namespace: str, artifact_path: str) -> None:
+    """Acquire a runtime lease for one plan-version module namespace."""
+    module_namespace.acquire(namespace, artifact_path)
+
+
+def release_python_module_namespace(namespace: str) -> bool:
+    """Release a runtime lease and drop the namespace after the last user."""
+    dropped = module_namespace.release(namespace, drop_if_unused=True)
+    if dropped:
+        for cache_key in list(_PYTHON_FUNCTION_CACHE):
+            if cache_key[0].startswith(namespace + "."):
+                del _PYTHON_FUNCTION_CACHE[cache_key]
+    return dropped
 
 
 def _is_function_cacheable(func: Callable) -> bool:
@@ -133,6 +157,9 @@ class PythonFunction(Function):
     qualname: str
     __func: Callable = None
     __is_cacheable: bool = None
+    _module_namespace: str | None = PrivateAttr(
+        default_factory=module_namespace.current
+    )
 
     @model_serializer
     def __custom_serializer(self) -> dict[str, Any]:
@@ -222,7 +249,9 @@ class PythonFunction(Function):
 
     def __get_func(self) -> Callable:
         if self.__func is None:
-            module = importlib.import_module(self.module)
+            module = importlib.import_module(
+                module_namespace.qualify(self._module_namespace, self.module)
+            )
             # TODO: support function of inner class.
             if "." in self.qualname:
                 # Handle class methods (e.g., 'ClassName.method')
@@ -233,6 +262,10 @@ class PythonFunction(Function):
                 # Handle standalone functions
                 self.__func = getattr(module, self.qualname)
         return self.__func
+
+    def set_module_namespace(self, namespace: str | None) -> None:
+        """Bind this descriptor to one plan-version module namespace."""
+        self._module_namespace = namespace
 
     def is_cacheable(self) -> bool:
         """Check if this function is cacheable, caching the result for future calls."""
@@ -314,11 +347,27 @@ class JavaFunction(Function):
             raise TypeError(msg)
 
 
-def call_python_function(module: str, qualname: str, func_args: Tuple[Any, ...]) -> Any:
+def resolve_python_function(
+    module: str, qualname: str, namespace: str | None = None
+) -> None:
+    """Import and resolve one declared action without executing it."""
+    python_func = PythonFunction(module=module, qualname=qualname)
+    python_func.set_module_namespace(namespace)
+    python_func.as_callable()
+
+
+def call_python_function(
+    module: str,
+    qualname: str,
+    func_args: Tuple[Any, ...],
+    namespace: str | None = None,
+) -> Any:
     """Used to call a Python function in the Pemja environment.
 
     Uses selective caching to reuse PythonFunction instances for identical
     (module, qualname) pairs to improve performance during frequent invocations.
+    Artifact switching clears this cache at the checkpoint barrier before the
+    new plan resolves any action.
     Only caches functions that are safe to cache (no closures, generators, etc.).
 
     Parameters
@@ -335,18 +384,21 @@ def call_python_function(module: str, qualname: str, func_args: Tuple[Any, ...])
     Any
         The result of calling the function with the provided arguments.
     """
-    cache_key = (module, qualname)
+    resolved_module = module_namespace.qualify(namespace, module)
+    cache_key = (resolved_module, qualname)
 
     python_func = None
 
     if cache_key not in _PYTHON_FUNCTION_CACHE:
         python_func = PythonFunction(module=module, qualname=qualname)
+        python_func.set_module_namespace(namespace)
         if python_func.is_cacheable():
             _PYTHON_FUNCTION_CACHE[cache_key] = python_func
     else:
         python_func = _PYTHON_FUNCTION_CACHE[cache_key]
 
-    func_result = python_func(*func_args)
+    with bind_python_module_namespace(namespace):
+        func_result = python_func(*func_args)
     return func_result
 
 

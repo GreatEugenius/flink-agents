@@ -44,6 +44,8 @@ public class KafkaActionStateStoreTest {
 
     private static final String TEST_TOPIC = "test-action-state";
     private static final String TEST_KEY = "test-key";
+    private static final String PLAN_ID_A = "a".repeat(64);
+    private static final String PLAN_ID_B = "b".repeat(64);
 
     private MockProducer<String, ActionState> mockProducer;
     private MockConsumer<String, ActionState> mockConsumer;
@@ -134,6 +136,24 @@ public class KafkaActionStateStoreTest {
         assertNotNull(actionStateStore.get(TEST_KEY, 2L, testAction, testEvent));
         assertNull(actionStateStore.get(TEST_KEY, 3L, testAction, testEvent));
         assertNull(actionStateStore.get(TEST_KEY, 4L, testAction, testEvent));
+    }
+
+    @Test
+    void planScopesDoNotCauseDivergenceOrCleanEachOthersFutureState() throws Exception {
+        actionStateStore.setActivePlanId(PLAN_ID_A);
+        actionStateStore.put(TEST_KEY, 1L, testAction, testEvent, testActionState);
+        actionStateStore.put(TEST_KEY, 2L, testAction, testEvent, testActionState);
+
+        actionStateStore.setActivePlanId(PLAN_ID_B);
+        actionStateStore.put(TEST_KEY, 1L, testAction, testEvent, testActionState);
+        assertThat(actionStateStore.get(TEST_KEY, 1L, testAction, testEvent))
+                .isSameAs(testActionState);
+
+        actionStateStore.setActivePlanId(PLAN_ID_A);
+        assertThat(actionStateStore.get(TEST_KEY, 1L, testAction, testEvent))
+                .isSameAs(testActionState);
+        assertThat(actionStateStore.get(TEST_KEY, 2L, testAction, testEvent))
+                .isSameAs(testActionState);
     }
 
     @Test

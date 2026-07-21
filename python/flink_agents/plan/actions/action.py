@@ -23,6 +23,7 @@ from pydantic import BaseModel, ConfigDict, field_serializer, model_validator
 
 from flink_agents.api.events.event import Event
 from flink_agents.api.runner_context import RunnerContext
+from flink_agents.plan import module_namespace
 from flink_agents.plan.function import Function, JavaFunction, PythonFunction
 
 _CONFIG_TYPE = "__config_type__"
@@ -96,7 +97,9 @@ class Action(BaseModel):
             return self
         for name, value in config.items():
             try:
-                module = importlib.import_module(value[0])
+                module = importlib.import_module(
+                    module_namespace.qualify(module_namespace.current(), value[0])
+                )
                 clazz = getattr(module, value[1])
                 self["config"][name] = clazz.model_validate(value[2])
             except Exception:  # noqa : PERF203

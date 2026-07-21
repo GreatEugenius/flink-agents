@@ -29,6 +29,8 @@ import org.apache.flink.agents.api.annotation.Action;
 import org.apache.flink.agents.api.context.MemoryObject;
 import org.apache.flink.agents.api.context.RunnerContext;
 import org.apache.flink.agents.plan.AgentConfiguration;
+import org.apache.flink.configuration.Configuration;
+import org.apache.flink.configuration.TaskManagerOptions;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.junit.jupiter.api.Test;
@@ -123,7 +125,11 @@ class ShortTermMemoryTTLIntegrationTest {
     private static List<String> runScenario(
             long ttlMs, long sleepMs, boolean configureTtlMs, boolean configureTtlOptions)
             throws Exception {
-        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+        Configuration configuration = new Configuration();
+        configuration.set(TaskManagerOptions.MINI_CLUSTER_NUM_TASK_MANAGERS, 2);
+        configuration.set(TaskManagerOptions.NUM_TASK_SLOTS, 1);
+        StreamExecutionEnvironment env =
+                StreamExecutionEnvironment.getExecutionEnvironment(configuration);
         env.setParallelism(1);
 
         AgentsExecutionEnvironment agentEnv =

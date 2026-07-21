@@ -22,11 +22,14 @@ import org.apache.flink.agents.api.Event;
 import org.apache.flink.agents.api.InputEvent;
 import org.apache.flink.agents.api.context.RunnerContext;
 import org.junit.jupiter.api.Test;
+import pemja.core.PythonInterpreter;
 
 import java.util.HashMap;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 
 /** Dispatch tests for plan-layer {@link Function} invocation. */
 class PlanFunctionDispatchTest {
@@ -58,6 +61,44 @@ class PlanFunctionDispatchTest {
         assertThatThrownBy(() -> fn.call(new InputEvent(new HashMap<>()), null))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("PythonFunction requires the Python interpreter");
+    }
+
+    @Test
+    void pythonFunctionDispatchUsesBoundModuleMethod() throws Exception {
+        PythonInterpreter interpreter = mock(PythonInterpreter.class);
+        PythonFunction fn = new PythonFunction("test.module", "test_handler");
+        fn.setInterpreter(interpreter);
+        fn.setInvocationModule("__fa_function_module");
+
+        fn.call("event");
+
+        verify(interpreter)
+                .invokeMethod(
+                        "__fa_function_module",
+                        "call_python_function",
+                        "test.module",
+                        "test_handler",
+                        new Object[] {"event"});
+    }
+
+    @Test
+    void pythonFunctionDispatchIncludesPlanModuleNamespaceWhenConfigured() throws Exception {
+        PythonInterpreter interpreter = mock(PythonInterpreter.class);
+        PythonFunction fn = new PythonFunction("app.agent", "handle");
+        fn.setInterpreter(interpreter);
+        fn.setInvocationModule("__fa_function_module");
+        fn.setModuleNamespace("__fa_job_operator_v2");
+
+        fn.call("event");
+
+        verify(interpreter)
+                .invokeMethod(
+                        "__fa_function_module",
+                        "call_python_function",
+                        "app.agent",
+                        "handle",
+                        new Object[] {"event"},
+                        "__fa_job_operator_v2");
     }
 
     @Test

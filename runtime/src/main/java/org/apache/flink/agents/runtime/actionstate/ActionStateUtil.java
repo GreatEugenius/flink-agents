@@ -25,6 +25,7 @@ import org.apache.flink.agents.plan.actions.Action;
 import org.apache.flink.util.Preconditions;
 
 import javax.annotation.Nonnull;
+import javax.annotation.Nullable;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -44,21 +45,44 @@ public class ActionStateUtil {
     public static String generateKey(
             @Nonnull Object key, long seqNum, @Nonnull Action action, @Nonnull Event event)
             throws IOException {
+        return generateKey(key, seqNum, action, event, null);
+    }
+
+    /**
+     * Variant scoped by a dynamic plan's content identity. Results written by different plans are
+     * isolated, while resubmitting the same plan under a new planVersion reuses the same scope. A
+     * null planId is reserved for standalone, unscoped store use.
+     */
+    public static String generateKey(
+            @Nonnull Object key,
+            long seqNum,
+            @Nonnull Action action,
+            @Nonnull Event event,
+            @Nullable String planId)
+            throws IOException {
         Preconditions.checkNotNull(key, "key cannot be null.");
         Preconditions.checkNotNull(action, "action cannot be null.");
         Preconditions.checkNotNull(event, "event cannot be null.");
-        return String.join(
-                KEY_SEPARATOR,
-                key.toString(),
-                String.valueOf(seqNum),
-                generateUUIDForEvent(event),
-                generateUUIDForAction(action));
+        String baseKey =
+                String.join(
+                        KEY_SEPARATOR,
+                        key.toString(),
+                        String.valueOf(seqNum),
+                        generateUUIDForEvent(event),
+                        generateUUIDForAction(action));
+        if (planId == null) {
+            return baseKey;
+        }
+        Preconditions.checkArgument(
+                planId.matches("[0-9a-f]{64}"),
+                "planId must contain exactly 64 lowercase hexadecimal characters.");
+        return String.join(KEY_SEPARATOR, baseKey, planId);
     }
 
     public static List<String> parseKey(String key) {
         Preconditions.checkNotNull(key, "key cannot be null.");
         String[] parts = key.split(KEY_SEPARATOR);
-        Preconditions.checkArgument(parts.length == 4, "Invalid key format.");
+        Preconditions.checkArgument(parts.length == 4 || parts.length == 5, "Invalid key format.");
         return List.of(parts);
     }
 

@@ -23,12 +23,14 @@ import java.util.Objects;
 
 /** Represent a Python function. */
 public class PythonFunction implements Function {
-    private static final String CALL_PYTHON_FUNCTION = "function.call_python_function";
+    private static final String CALL_PYTHON_FUNCTION = "call_python_function";
 
     private final String module;
     private final String qualName;
 
     private transient PythonInterpreter interpreter;
+    private transient String invocationModule;
+    private transient String moduleNamespace;
 
     public PythonFunction(String module, String qualName) {
         this.module = module;
@@ -37,6 +39,14 @@ public class PythonFunction implements Function {
 
     public void setInterpreter(PythonInterpreter interpreter) {
         this.interpreter = interpreter;
+    }
+
+    public void setInvocationModule(String invocationModule) {
+        this.invocationModule = invocationModule;
+    }
+
+    public void setModuleNamespace(String moduleNamespace) {
+        this.moduleNamespace = moduleNamespace;
     }
 
     @Override
@@ -48,7 +58,18 @@ public class PythonFunction implements Function {
                             + "invocation.");
         }
 
-        return interpreter.invoke(CALL_PYTHON_FUNCTION, module, qualName, args);
+        if (invocationModule == null) {
+            throw new IllegalStateException(
+                    "PythonFunction requires the Python invocation module; not set on this "
+                            + "descriptor. The runtime injects it before invocation.");
+        }
+
+        if (moduleNamespace == null) {
+            return interpreter.invokeMethod(
+                    invocationModule, CALL_PYTHON_FUNCTION, module, qualName, args);
+        }
+        return interpreter.invokeMethod(
+                invocationModule, CALL_PYTHON_FUNCTION, module, qualName, args, moduleNamespace);
     }
 
     @Override

@@ -32,6 +32,8 @@ import org.apache.flink.agents.api.vectorstores.VectorStoreQueryResult;
 import pemja.core.PythonInterpreter;
 import pemja.core.object.PyObject;
 
+import javax.annotation.Nullable;
+
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -80,15 +82,25 @@ public class PythonResourceAdapterImpl implements PythonResourceAdapter {
     private final ResourceContext resourceContext;
     private final PythonInterpreter interpreter;
     private final JavaResourceAdapter javaResourceAdapter;
+    @Nullable private final String moduleNamespace;
     private PyObject pythonResourceContext;
 
     public PythonResourceAdapterImpl(
             ResourceContext resourceContext,
             PythonInterpreter interpreter,
             JavaResourceAdapter javaResourceAdapter) {
+        this(resourceContext, interpreter, javaResourceAdapter, null);
+    }
+
+    public PythonResourceAdapterImpl(
+            ResourceContext resourceContext,
+            PythonInterpreter interpreter,
+            JavaResourceAdapter javaResourceAdapter,
+            @Nullable String moduleNamespace) {
         this.resourceContext = resourceContext;
         this.interpreter = interpreter;
         this.javaResourceAdapter = javaResourceAdapter;
+        this.moduleNamespace = moduleNamespace;
     }
 
     public void open() {
@@ -131,7 +143,11 @@ public class PythonResourceAdapterImpl implements PythonResourceAdapter {
     @Override
     public PyObject initPythonResource(String module, String clazz, Map<String, Object> kwargs) {
         kwargs.put(RESOURCE_CONTEXT_KEY, pythonResourceContext);
-        return (PyObject) interpreter.invoke(CREATE_RESOURCE, module, clazz, kwargs);
+        if (moduleNamespace == null) {
+            return (PyObject) interpreter.invoke(CREATE_RESOURCE, module, clazz, kwargs);
+        }
+        return (PyObject)
+                interpreter.invoke(CREATE_RESOURCE, module, clazz, kwargs, moduleNamespace);
     }
 
     @Override
@@ -214,10 +230,22 @@ public class PythonResourceAdapterImpl implements PythonResourceAdapter {
     public Map<String, String> getPythonToolMetadata(
             String module, String qualName, java.util.List<String> injectedArgs) {
         @SuppressWarnings("unchecked")
-        Map<String, String> result =
-                (Map<String, String>)
-                        interpreter.invoke(
-                                GET_PYTHON_TOOL_METADATA, module, qualName, injectedArgs);
+        Map<String, String> result;
+        if (moduleNamespace == null) {
+            result =
+                    (Map<String, String>)
+                            interpreter.invoke(
+                                    GET_PYTHON_TOOL_METADATA, module, qualName, injectedArgs);
+        } else {
+            result =
+                    (Map<String, String>)
+                            interpreter.invoke(
+                                    GET_PYTHON_TOOL_METADATA,
+                                    module,
+                                    qualName,
+                                    injectedArgs,
+                                    moduleNamespace);
+        }
         if (result == null) {
             throw new IllegalStateException(
                     "Python get_python_tool_metadata returned null for " + module + ":" + qualName);
@@ -227,6 +255,9 @@ public class PythonResourceAdapterImpl implements PythonResourceAdapter {
 
     @Override
     public Object invokePythonTool(String module, String qualName, Map<String, Object> kwargs) {
-        return interpreter.invoke(INVOKE_PYTHON_TOOL, module, qualName, kwargs);
+        if (moduleNamespace == null) {
+            return interpreter.invoke(INVOKE_PYTHON_TOOL, module, qualName, kwargs);
+        }
+        return interpreter.invoke(INVOKE_PYTHON_TOOL, module, qualName, kwargs, moduleNamespace);
     }
 }

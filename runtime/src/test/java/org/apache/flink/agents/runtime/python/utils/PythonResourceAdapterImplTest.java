@@ -82,6 +82,47 @@ public class PythonResourceAdapterImplTest {
     }
 
     @Test
+    void planNamespaceIsForwardedForUserResourcesAndTools() {
+        PythonResourceAdapterImpl namespacedAdapter =
+                new PythonResourceAdapterImpl(
+                        resourceContext, mockInterpreter, null, "__fa_job_operator_v2");
+        Map<String, Object> kwargs = new HashMap<>();
+        when(mockInterpreter.invoke(
+                        PythonResourceAdapterImpl.GET_PYTHON_TOOL_METADATA,
+                        "app.tools",
+                        "lookup",
+                        java.util.List.of(),
+                        "__fa_job_operator_v2"))
+                .thenReturn(Map.of("name", "lookup"));
+
+        namespacedAdapter.initPythonResource("app.resources", "Resource", kwargs);
+        namespacedAdapter.getPythonToolMetadata("app.tools", "lookup");
+        namespacedAdapter.invokePythonTool("app.tools", "lookup", kwargs);
+
+        verify(mockInterpreter)
+                .invoke(
+                        PythonResourceAdapterImpl.CREATE_RESOURCE,
+                        "app.resources",
+                        "Resource",
+                        kwargs,
+                        "__fa_job_operator_v2");
+        verify(mockInterpreter)
+                .invoke(
+                        PythonResourceAdapterImpl.GET_PYTHON_TOOL_METADATA,
+                        "app.tools",
+                        "lookup",
+                        java.util.List.of(),
+                        "__fa_job_operator_v2");
+        verify(mockInterpreter)
+                .invoke(
+                        PythonResourceAdapterImpl.INVOKE_PYTHON_TOOL,
+                        "app.tools",
+                        "lookup",
+                        kwargs,
+                        "__fa_job_operator_v2");
+    }
+
+    @Test
     void testOpen() {
 
         pythonResourceAdapter.open();

@@ -52,6 +52,7 @@ class RemoteAgentBuilder(AgentBuilder):
 
     __input: DataStream
     __agent_plan: AgentPlan = None
+    __agent_name: str = None
     __output: DataStream = None
     __t_env: StreamTableEnvironment
     __config: AgentConfiguration
@@ -82,7 +83,9 @@ class RemoteAgentBuilder(AgentBuilder):
             )
         return self.__t_env
 
-    def apply(self, agent: Agent | str) -> "AgentBuilder":
+    def apply(
+        self, agent: Agent | str, name: str | None = None
+    ) -> "AgentBuilder":
         """Set agent of execution environment.
 
         Parameters
@@ -90,6 +93,9 @@ class RemoteAgentBuilder(AgentBuilder):
         agent : Agent | str
             Either an Agent instance, or the name of an agent registered
             on the environment (e.g. by ``load_yaml``).
+        name : str, optional
+            Stable deployment name. Defaults to the Agent class name, or to
+            the registry name when ``agent`` is a string.
         """
         if self.__agent_plan is not None:
             err_msg = "RemoteAgentBuilder doesn't support apply multiple agents yet."
@@ -101,13 +107,21 @@ class RemoteAgentBuilder(AgentBuilder):
                     "environment. Did you call load_yaml first?"
                 )
                 raise ValueError(msg)
+            agent_name = name if name is not None else agent
             agent = self.__agents[agent]
+        else:
+            agent_name = name if name is not None else agent.__class__.__name__
+
+        if not agent_name or not agent_name.strip():
+            msg = "The agent name must not be blank."
+            raise ValueError(msg)
 
         # inspect refer actions and resources from env to agent.
         for type, name_to_resource in self.__resources.items():
             agent.resources[type] = name_to_resource | agent.resources[type]
 
         self.__agent_plan = AgentPlan.from_agent(agent, self.__config)
+        self.__agent_name = agent_name
 
         return self
 
@@ -131,10 +145,12 @@ class RemoteAgentBuilder(AgentBuilder):
                 "connectToAgent",
                 [
                     self.__input._j_data_stream,
+                    self.__agent_name,
                     self.__agent_plan.model_dump_json(serialize_as_any=True),
                 ],
                 [
                     "org.apache.flink.streaming.api.datastream.KeyedStream",
+                    "java.lang.String",
                     "java.lang.String",
                 ],
             )

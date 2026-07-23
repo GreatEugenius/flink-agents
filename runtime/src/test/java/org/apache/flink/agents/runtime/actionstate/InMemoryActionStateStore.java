@@ -42,12 +42,21 @@ public class InMemoryActionStateStore implements ActionStateStore {
         this.doCleanup = doCleanup;
     }
 
+    // Dynamic-plan key scope; 0 = legacy format (see ActionStateStore#setActivePlanVersion).
+    private volatile long activePlanVersion;
+
+    @Override
+    public void setActivePlanVersion(long planVersion) {
+        this.activePlanVersion = planVersion;
+    }
+
     @Override
     public void put(Object key, long seqNum, Action action, Event event, ActionState state)
             throws IOException {
         Map<String, ActionState> actionStates =
                 keyedActionStates.getOrDefault(key.toString(), new HashMap<>());
-        actionStates.put(generateKey(key.toString(), seqNum, action, event), state);
+        actionStates.put(
+                generateKey(key.toString(), seqNum, action, event, activePlanVersion), state);
         keyedActionStates.put(key.toString(), actionStates);
     }
 
@@ -55,7 +64,7 @@ public class InMemoryActionStateStore implements ActionStateStore {
     public ActionState get(Object key, long seqNum, Action action, Event event) throws IOException {
         return keyedActionStates
                 .getOrDefault(key.toString(), new HashMap<>())
-                .get(generateKey(key.toString(), seqNum, action, event));
+                .get(generateKey(key.toString(), seqNum, action, event, activePlanVersion));
     }
 
     @Override

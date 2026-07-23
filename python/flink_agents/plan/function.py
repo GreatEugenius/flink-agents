@@ -19,8 +19,12 @@
 import importlib
 import inspect
 import logging
+import os
+import sys
+import zipfile
+import zipimport
 from abc import ABC, abstractmethod
-from typing import Any, Callable, Dict, List, Tuple, get_type_hints
+from typing import Any, Callable, Dict, Iterable, List, Tuple, get_type_hints
 
 from pydantic import BaseModel, PrivateAttr, model_serializer
 
@@ -28,6 +32,11 @@ from flink_agents.plan.utils import check_type_match
 
 # Global cache for PythonFunction instances to avoid repeated creation
 _PYTHON_FUNCTION_CACHE: Dict[Tuple[str, str], "PythonFunction"] = {}
+
+# PemJa MULTI_THREAD interpreters share one CPython process. The coordinated agent
+# operator is therefore deployed as the process's sole Python owner, and only one
+# artifact may be active in that process at a time.
+_ACTIVE_PYTHON_ARTIFACT: Tuple[str, Tuple[str, ...]] | None = None
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
@@ -99,6 +108,99 @@ def _is_function_cacheable(func: Callable) -> bool:
         return False
 
     return True
+
+
+def switch_python_artifact(artifact_path: str | None) -> None:
+    """Replace the process's active immutable user artifact.
+
+    The caller has quiesced the old plan, so this is the only code mutating
+    process-wide import state. ``None`` retires the active artifact. A new
+    archive is inspected before any mutation, so an invalid artifact leaves the
+    current import state untouched.
+    """
+    global _ACTIVE_PYTHON_ARTIFACT
+
+    new_artifact_path = _normalize_path(artifact_path)
+    new_roots = _python_artifact_roots(new_artifact_path)
+    previous_artifact_path = None
+    previous_roots: Tuple[str, ...] = ()
+    if _ACTIVE_PYTHON_ARTIFACT is not None:
+        previous_artifact_path, previous_roots = _ACTIVE_PYTHON_ARTIFACT
+
+    _purge_python_modules(set(previous_roots) | set(new_roots))
+    for path in {previous_artifact_path, new_artifact_path}:
+        if path is not None:
+            _remove_python_artifact_path(path)
+    if new_artifact_path is not None:
+        sys.path.insert(0, new_artifact_path)
+
+    _PYTHON_FUNCTION_CACHE.clear()
+    _ACTIVE_PYTHON_ARTIFACT = (
+        (new_artifact_path, new_roots) if new_artifact_path is not None else None
+    )
+
+
+def _python_artifact_roots(artifact_path: str | None) -> Tuple[str, ...]:
+    """Return import roots owned by one directly importable zip/whl artifact."""
+    if artifact_path is None:
+        return ()
+
+    roots = set()
+    with zipfile.ZipFile(artifact_path) as archive:
+        for entry in archive.infolist():
+            if entry.is_dir() or not entry.filename.endswith(".py"):
+                continue
+            parts = entry.filename.split("/")
+            if not parts or any(part in {"", ".", ".."} for part in parts):
+                continue
+            root = parts[0][:-3] if len(parts) == 1 else parts[0]
+            if root.isidentifier() and not _is_framework_module(root):
+                roots.add(root)
+    return tuple(sorted(roots))
+
+
+def _purge_python_modules(module_roots: Iterable[str]) -> None:
+    owned_roots = set(module_roots)
+    for loaded_name in list(sys.modules):
+        if not _is_framework_module(loaded_name) and (
+            loaded_name.split(".", 1)[0] in owned_roots
+        ):
+            sys.modules.pop(loaded_name, None)
+
+
+def _remove_python_artifact_path(artifact_path: str) -> None:
+    sys.path[:] = [
+        entry
+        for entry in sys.path
+        if _normalize_path(entry) != artifact_path
+    ]
+    for cached_path in list(sys.path_importer_cache):
+        if _path_belongs_to_artifact(cached_path, artifact_path):
+            del sys.path_importer_cache[cached_path]
+    for cached_path in list(zipimport._zip_directory_cache):
+        if _path_belongs_to_artifact(cached_path, artifact_path):
+            del zipimport._zip_directory_cache[cached_path]
+
+
+def _path_belongs_to_artifact(candidate: Any, artifact_path: str) -> bool:
+    normalized = _normalize_path(candidate)
+    return normalized is not None and (
+        normalized == artifact_path
+        or normalized.startswith(artifact_path + os.sep)
+    )
+
+
+def _normalize_path(candidate: Any) -> str | None:
+    if not isinstance(candidate, str) or not candidate.strip():
+        return None
+    try:
+        return os.path.realpath(candidate)
+    except (OSError, TypeError, ValueError):
+        return None
+
+
+def _is_framework_module(module: str) -> bool:
+    return module == "flink_agents" or module.startswith("flink_agents.")
 
 
 class Function(BaseModel, ABC):
@@ -314,11 +416,21 @@ class JavaFunction(Function):
             raise TypeError(msg)
 
 
-def call_python_function(module: str, qualname: str, func_args: Tuple[Any, ...]) -> Any:
+def resolve_python_function(module: str, qualname: str) -> None:
+    """Import and resolve one declared action without executing it."""
+    python_func = PythonFunction(module=module, qualname=qualname)
+    python_func.as_callable()
+
+
+def call_python_function(
+    module: str, qualname: str, func_args: Tuple[Any, ...]
+) -> Any:
     """Used to call a Python function in the Pemja environment.
 
     Uses selective caching to reuse PythonFunction instances for identical
     (module, qualname) pairs to improve performance during frequent invocations.
+    Artifact switching clears this cache at the checkpoint barrier before the
+    new plan resolves any action.
     Only caches functions that are safe to cache (no closures, generators, etc.).
 
     Parameters

@@ -20,6 +20,8 @@ package org.apache.flink.agents.runtime;
 import org.apache.flink.agents.plan.AgentPlan;
 import org.apache.flink.agents.runtime.operator.ActionExecutionOperatorTest;
 import org.apache.flink.api.java.functions.KeySelector;
+import org.apache.flink.configuration.Configuration;
+import org.apache.flink.configuration.TaskManagerOptions;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.datastream.DataStreamSource;
 import org.apache.flink.streaming.api.datastream.KeyedStream;
@@ -53,7 +55,7 @@ public class CompileUtilsTest {
 
     @Test
     void testJavaNoKeyedStreamConnectToAgent() throws Exception {
-        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+        StreamExecutionEnvironment env = createExecutionEnvironment();
 
         DataStreamSource<Long> inputStream = env.fromData(testSequence);
         DataStream<Object> agentOutputStream =
@@ -66,6 +68,7 @@ public class CompileUtilsTest {
                                 return value;
                             }
                         },
+                        "TestAgent",
                         TEST_AGENT_PLAN);
         DataStream<Long> resultStream = agentOutputStream.map(x -> (long) x + 1);
 
@@ -80,11 +83,11 @@ public class CompileUtilsTest {
 
     @Test
     void testJavaKeyedStreamConnectToAgent() throws Exception {
-        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+        StreamExecutionEnvironment env = createExecutionEnvironment();
 
         KeyedStream<Long, Long> keyedInputStream = env.fromData(testSequence).keyBy(x -> x);
         DataStream<Object> workflowOutputStream =
-                CompileUtils.connectToAgent(keyedInputStream, TEST_AGENT_PLAN);
+                CompileUtils.connectToAgent(keyedInputStream, "TestAgent", TEST_AGENT_PLAN);
         DataStream<Long> resultStream = workflowOutputStream.map(x -> (long) x + 1);
 
         List<Long> resultList = new ArrayList<>();
@@ -94,6 +97,16 @@ public class CompileUtilsTest {
         resultList.sort(Long::compareTo);
 
         checkResult(resultList);
+    }
+
+    private static StreamExecutionEnvironment createExecutionEnvironment() {
+        Configuration configuration = new Configuration();
+        configuration.set(TaskManagerOptions.MINI_CLUSTER_NUM_TASK_MANAGERS, 2);
+        configuration.set(TaskManagerOptions.NUM_TASK_SLOTS, 1);
+        StreamExecutionEnvironment env =
+                StreamExecutionEnvironment.getExecutionEnvironment(configuration);
+        env.setParallelism(1);
+        return env;
     }
 
     private static List<Long> getTestSequence() {
